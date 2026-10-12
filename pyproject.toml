@@ -1,0 +1,102 @@
+[project]
+name = "nem-forecast"
+version = "0.1.0"
+description = "Half-hourly electricity demand forecasting for the Victorian region (VIC1) of Australia's National Electricity Market."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Azhar Khan" }]
+requires-python = ">=3.12,<3.14"
+classifiers = [
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Typing :: Typed",
+]
+dependencies = [
+    "evidently",
+    "fastapi",
+    "httpx",
+    "lightgbm",
+    "mlflow",
+    "pandas",
+    "polars",
+    "psycopg[binary]>=3.2",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.3",
+    "scikit-learn",
+    "sqlalchemy>=2.0",
+    "typer>=0.12",
+    "uvicorn",
+]
+
+[project.scripts]
+nem-forecast = "nem_forecast.cli:app"
+
+[dependency-groups]
+dev = [
+    "mypy",
+    "pytest",
+    "pytest-cov",
+    "pytest-postgresql",
+    "ruff",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/nem_forecast"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "B",   # bugbear
+    "UP",  # pyupgrade
+    "SIM", # simplify
+    "RUF", # ruff-specific
+    "DTZ", # naive datetimes: every timestamp in this project must be timezone-aware
+    "PT",  # pytest style
+    "S",   # bandit
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+files = ["src", "tests"]
+mypy_path = "src"
+plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+module = ["evidently.*", "lightgbm.*", "mlflow.*", "sklearn.*"]
+ignore_missing_imports = true
+
+[tool.pydantic-mypy]
+init_forbid_extra = true
+init_typed = true
+warn_required_dynamic_aliases = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers --strict-config"
+markers = ["integration: needs a reachable PostgreSQL server (skipped otherwise)"]
+
+[tool.coverage.run]
+source = ["nem_forecast"]
+branch = true
+
+[tool.coverage.report]
+fail_under = 80
+show_missing = true
+exclude_also = ["if TYPE_CHECKING:", "if __name__ == .__main__.:"]

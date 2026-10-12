@@ -1,0 +1,36 @@
+# Secrets: config comes from environment variables only. .env.example is the committed template.
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+
+# Tooling caches
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# Local data and experiment output (data lives in Neon, runs in DagsHub, models on HF Hub)
+.cache/
+data/
+mlruns/
+mlartifacts/
+*.parquet
+*.joblib
+*.pkl
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
