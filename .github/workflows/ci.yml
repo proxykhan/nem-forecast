@@ -17,6 +17,25 @@ jobs:
     runs-on: ubuntu-latest
     env:
       ENVIRONMENT: ci
+      # Integration tests (idempotent upserts, revisions, backfill resume) run against this
+      # service and must not silently skip.
+      REQUIRE_POSTGRES: "1"
+      TEST_PG_HOST: localhost
+      TEST_PG_PORT: "5432"
+      TEST_PG_USER: postgres
+      TEST_PG_PASSWORD: postgres
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v7
 
@@ -36,7 +55,6 @@ jobs:
       - name: Type check
         run: uv run mypy
 
-      # Integration tests skip here until Phase 5 adds a Postgres service container.
       # Coverage threshold (80%) is enforced by [tool.coverage.report] fail_under.
       - name: Test
         run: uv run pytest --cov --cov-report=term-missing --cov-report=xml

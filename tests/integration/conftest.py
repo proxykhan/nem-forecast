@@ -1,8 +1,8 @@
 """Integration fixtures backed by a real PostgreSQL server.
 
 Each test gets a freshly created database (via pytest-postgresql), dropped afterwards. The tests
-skip, rather than fail, when no server is reachable, so ``pytest`` still works on a laptop
-without Docker running.
+skip when no server is reachable, so ``pytest`` still works on a laptop without Docker running,
+unless REQUIRE_POSTGRES is set (as in CI), where an unreachable server is a failure.
 """
 
 from __future__ import annotations
@@ -32,7 +32,10 @@ def postgres_available() -> None:
     try:
         socket.create_connection((PG_HOST, PG_PORT), timeout=1).close()
     except OSError:
-        pytest.skip(f"PostgreSQL not reachable at {PG_HOST}:{PG_PORT}")
+        message = f"PostgreSQL not reachable at {PG_HOST}:{PG_PORT}"
+        if os.getenv("REQUIRE_POSTGRES"):
+            pytest.fail(message)
+        pytest.skip(message)
 
 
 @pytest.fixture

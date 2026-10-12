@@ -1,0 +1,58 @@
+name: Ingest
+
+# Pulls the last 24 hours of 5-minute dispatch data from NEMWeb into Neon every 6 hours. The
+# overlapping windows are deliberate: the loader is idempotent, so re-reading an interval is
+# free, and a single missed run loses nothing. Data goes to the database; this workflow never
+# commits to the repository.
+#
+# NOTE: GitHub disables scheduled workflows in public repositories after 60 days without
+# repository activity. If ingestion silently stops, re-enable this workflow in the Actions tab
+# (or push any commit), then run `nem-forecast backfill` to fill the gap from the monthly files.
+
+on:
+  schedule:
+    - cron: "17 */6 * * *" # minute 17: off the top of the hour, when Actions queues are busiest
+  workflow_dispatch:
+    inputs:
+      hours:
+        description: "Hours of history to ingest (NEMWeb Current keeps about 48)"
+        default: "24"
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ingest
+  cancel-in-progress: false
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      ENVIRONMENT: ci
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      HOURS: ${{ inputs.hours || '24' }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v10.3.0
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --locked --no-dev
+
+      - name: Check configuration
+        run: |
+          if [ -z "$DATABASE_URL" ]; then
+            echo "::error::DATABASE_URL secret is not set (Settings > Secrets and variables > Actions)"
+            exit 1
+          fi
+
+      - name: Apply migrations
+        run: uv run nem-forecast migrate
+
+      - name: Ingest
+        run: uv run nem-forecast ingest --hours "$HOURS" --region VIC1

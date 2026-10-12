@@ -15,7 +15,16 @@ def test_help_lists_every_pipeline_command() -> None:
     result = runner.invoke(app, ["--help"])
 
     assert result.exit_code == 0
-    for command in ("migrate", "ingest", "build-features", "backtest", "train", "serve", "monitor"):
+    for command in (
+        "migrate",
+        "ingest",
+        "backfill",
+        "build-features",
+        "backtest",
+        "train",
+        "serve",
+        "monitor",
+    ):
         assert command in result.output
 
 
@@ -29,7 +38,6 @@ def test_version() -> None:
 @pytest.mark.parametrize(
     ("command", "phase"),
     [
-        ("ingest", 1),
         ("build-features", 2),
         ("backtest", 2),
         ("train", 3),
