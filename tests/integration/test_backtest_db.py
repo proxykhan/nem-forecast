@@ -255,6 +255,16 @@ class TestModelCommands:
         assert result.exit_code == 2
         assert "commit your changes first" in plain(result.output)
 
+    def test_promotion_needs_a_hugging_face_token(
+        self, run_cli: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(cli, "git_sha", lambda: "0123456789abcdef0123456789abcdef01234567")
+
+        result = run_cli("train", "--model", "ridge", "--promote")
+
+        assert result.exit_code == 2
+        assert "HF_TOKEN is not set" in plain(result.output)
+
     def test_unknown_model_is_refused(self, run_cli: Any) -> None:
         result = run_cli("train", "--model", "prophet")
 
