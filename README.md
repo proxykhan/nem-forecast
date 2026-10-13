@@ -14,7 +14,7 @@ API that logs every forecast, and monitoring that scores those forecasts against
 |---|---|---|
 | 0 | Scaffold: layout, config, domain schemas, SQL migrations, CLI, CI | ✅ Done |
 | 1 | Ingestion: NEMWeb client, record-type parser, idempotent upsert with revision history, backfill | ✅ Done |
-| 2 | Features and backtesting: leakage-safe features, three baselines, walk-forward harness | ⬜ Not started |
+| 2 | Features and backtesting: leakage-safe features, baselines, walk-forward harness | ✅ Done |
 | 3 | Models and tracking: Ridge, LightGBM, quantile LightGBM, Optuna, DagsHub MLflow, HF Hub registry | ⬜ Not started |
 | 4 | Serving: FastAPI, prediction logging, Docker | ⬜ Not started |
 | 5 | Deployment and CI/CD: Render, hardened CI, nightly backtest | ⬜ Not started |
@@ -79,6 +79,63 @@ uv run nem-forecast ingest --start "2026-10-12 04:00" --end "2026-10-13 04:00" -
 Backfill commits each month together with its `ingest_log` row, so an interrupted run loses at
 most the month in flight; re-running skips every month already marked complete.
 
+## Features and backtesting
+
+The evaluation harness was built before any model, so it cannot have been bent to flatter one.
+
+**Leakage is checked, not assumed.** A forecast made at an *origin* for 48 half-hours ahead may
+only use data up to that origin, which is stricter than "data before the target": at horizon 5,
+the demand at t-1 doesn't exist yet. Every data-derived feature carries an `_asof` column holding
+the timestamp of the observation it actually used. The value is fetched by joining on that
+timestamp, so provenance can't drift from reality. `assert_no_leakage` checks every `_asof`
+against the row's cutoff, refuses any column it can't trace, and runs on every fold of every
+backtest. A separate test rewrites all data after the origin and asserts that no feature moves.
+
+| Feature | Definition (at horizon h, target t) | Latest data used |
+|---|---|---|
+| `demand_at_origin` | demand of the period ending at the origin (lag t-1 at h = 1) | origin |
+| `same_slot_prev_day` | same half-hour on the latest fully known day (lag t-48) | t - 1 day |
+| `same_slot_prev_week` | same half-hour a week earlier (lag t-336) | t - 7 days |
+| `same_slot_mean_4w` | mean of the same half-hour on the last 4 same weekdays | t - 7 days |
+| `rolling_mean_24h`, `rolling_std_24h`, `rolling_mean_7d` | windows ending at the origin | origin |
+| `half_hour`, `day_of_week`, `month`, `is_public_holiday` | calendar of the target, Melbourne wall-clock time, VIC holidays | known in advance |
+
+**Walk-forward backtest.** Expanding window, refit every 30 days, a forecast from *every*
+half-hourly origin, 48 horizons, over the most recent 365 days: 842,040 scored forecasts per
+model. Forecasting from every origin keeps horizon and time of day independent; with one daily
+origin, "horizon 12" would just mean "noon". Metrics are MAE, RMSE, MAPE, pinball loss at the
+10th/50th/90th percentiles and 10-90 interval coverage, each by horizon and by time-of-day
+bucket. Runs and metrics are saved to `model_runs` and `model_run_metrics`.
+
+**Baselines** ([full report](docs/backtest/README.md)), 2025-10-13 to 2026-10-13:
+
+| Baseline | MAE (MW) | MAPE (%) | Pinball avg (MW) | 10-90 coverage (%) |
+|---|--:|--:|--:|--:|
+| Seasonal naive: same half-hour yesterday | 506 | 11.0 | 179.0 | 80.0 |
+| Weekly seasonal naive: same half-hour last week | 592 | 13.0 | 209.8 | 79.4 |
+| Mean of the same half-hour on the last 4 same weekdays | **502** | **10.9** | **177.8** | 74.7 |
+| Persistence: last observed value, held flat | 970 | 20.8 | 300.0 | 79.7 |
+
+![MAE by horizon](docs/backtest/mae_by_horizon.png)
+
+What the baselines show:
+
+- **The three seasonal baselines are flat across horizons by construction.** Each reads a fixed
+  lag of the target, so it ignores everything observed since. Against them alone, any model that
+  sees recent demand would look spectacular at short horizons for free. That's why
+  **persistence** is included alongside the doc's three: it is the textbook short-horizon
+  benchmark, and it wins clearly up to 1.5 hours ahead (170 MW at 30 minutes).
+- **The bar a model must clear is therefore horizon-dependent:** persistence for horizons 1-3
+  (30-90 minutes), the 4-week same-weekday mean for every horizon from 2 hours to 24 hours.
+- **The midday solar trough is the hardest time of day** for every baseline (796-1,068 MW MAE
+  from 10:00 to 16:00), 3-4x the seasonal baselines' overnight error. Rooftop solar output depends on cloud
+  cover, which none of these rules can see.
+- **The 4-week mean is the most accurate but its intervals are the worst calibrated**: 74.7%
+  coverage against a nominal 80%. Averaging four weeks smooths the point forecast, which makes
+  its recent errors less representative of the next ones.
+
+Re-run with `uv run nem-forecast build-features` and `uv run nem-forecast backtest`.
+
 ## Database
 
 Schema changes are plain numbered SQL files in [`migrations/`](migrations/), applied in order by
@@ -90,6 +147,7 @@ are never edited; a change is always a new file.
 | `raw_dispatch` | AEMO demand and price, unique on `(settlement_date, region)`, with a `revision` counter because AEMO republishes revised values |
 | `raw_dispatch_history` | Every superseded value, with the file that replaced it |
 | `ingest_log` | One row per load batch: period, counts, missing intervals, completeness |
+| `features` | Horizon-1 feature rows (`v1`); multi-horizon frames are built in memory by the same code, since storing every (origin, horizon) pair would be 48x larger |
 | `features` | Versioned feature rows with a `data_cutoff` used to guard against leakage |
 | `predictions` | Every forecast served, the ground truth for monitoring |
 | `model_runs`, `model_run_metrics` | Backtest and training runs, with metrics by horizon and time of day |
