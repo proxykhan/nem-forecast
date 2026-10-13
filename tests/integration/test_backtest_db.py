@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -46,6 +47,12 @@ def with_dispatch(engine: Engine) -> Engine:
     with engine.begin() as conn:
         upsert_intervals(conn, records)
     return engine
+
+
+def plain(output: str) -> str:
+    """CLI error text without colour codes, box drawing or line wrapping (CI forces colour)."""
+    text = re.sub(r"\x1b\[[0-9;]*m", "", output)
+    return " ".join(text.replace("\u2502", " ").split())
 
 
 def scalar(engine: Engine, sql: str, **params: Any) -> Any:
@@ -245,11 +252,11 @@ class TestModelCommands:
     def test_promotion_refuses_code_that_is_not_committed(self, run_cli: Any) -> None:
         result = run_cli("train", "--model", "ridge", "--promote")
 
-        assert result.exit_code != 0
-        assert "commit your changes first" in result.output
+        assert result.exit_code == 2
+        assert "commit your changes first" in plain(result.output)
 
     def test_unknown_model_is_refused(self, run_cli: Any) -> None:
         result = run_cli("train", "--model", "prophet")
 
-        assert result.exit_code != 0
-        assert "choose one of" in result.output
+        assert result.exit_code == 2
+        assert "choose one of" in plain(result.output)
