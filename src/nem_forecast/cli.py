@@ -8,16 +8,24 @@ from __future__ import annotations
 import logging
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated
 
+import polars as pl
 import typer
 from sqlalchemy import Engine
 
 from nem_forecast import __version__
+from nem_forecast.backtest.baselines import BASELINES
+from nem_forecast.backtest.harness import BacktestConfig, run_backtest, save_results
+from nem_forecast.backtest.metrics import ALL_BUCKETS, ALL_HORIZONS
+from nem_forecast.backtest.report import write_report
 from nem_forecast.config import get_settings
 from nem_forecast.db import MIGRATIONS_DIR, apply_migrations, create_db_engine
+from nem_forecast.features.build import FEATURE_VERSION, one_step_features, write_features
+from nem_forecast.features.series import load_dispatch, to_half_hourly
+from nem_forecast.gitinfo import git_sha
 from nem_forecast.ingest.backfill import MonthStatus, default_months
 from nem_forecast.ingest.backfill import backfill as run_backfill
 from nem_forecast.ingest.loader import coverage
@@ -189,15 +197,54 @@ def backfill(
 
 
 @app.command()
-def build_features() -> None:
-    """Build leakage-safe features into the features table."""
-    raise _not_yet(2, "Feature building")
+def build_features(
+    region: Annotated[Region, typer.Option(help="Region to build features for.")] = Region.VIC1,
+) -> None:
+    """Build leakage-checked horizon-1 features into the features table."""
+    with _database() as engine:
+        frame = one_step_features(to_half_hourly(load_dispatch(engine, region)))
+        rows = write_features(engine, region, frame)
+    typer.echo(f"Wrote {rows:,} {FEATURE_VERSION} feature rows for {region}.")
 
 
 @app.command()
-def backtest() -> None:
-    """Run the walk-forward backtest for baselines and models."""
-    raise _not_yet(2, "Backtesting")
+def backtest(
+    region: Annotated[Region, typer.Option(help="Region to backtest.")] = Region.VIC1,
+    test_days: Annotated[
+        int, typer.Option(min=1, help="Length of the walk-forward evaluation period.")
+    ] = 365,
+    refit_every_days: Annotated[int, typer.Option(min=1, help="Days between refits.")] = 30,
+    report_dir: Annotated[Path, typer.Option(help="Where the markdown report goes.")] = Path(
+        "docs/backtest"
+    ),
+    save: Annotated[bool, typer.Option(help="Record runs and metrics in model_runs.")] = True,
+) -> None:
+    """Walk-forward backtest of every baseline; writes model_runs and a report."""
+    started = datetime.now(UTC)
+    config = BacktestConfig(test_days=test_days, refit_every_days=refit_every_days)
+    sha = git_sha()
+    with _database() as engine:
+        series = to_half_hourly(load_dispatch(engine, region))
+        result = run_backtest(series, [baseline() for baseline in BASELINES], config)
+        run_ids = (
+            save_results(engine, result, region=region, git_sha=sha, started_at=started)
+            if save
+            else None
+        )
+    path = write_report(
+        result, report_dir, region=region, git_sha=sha, generated_at=started, run_ids=run_ids
+    )
+
+    overall = result.metrics.filter(
+        pl.col("horizon") == ALL_HORIZONS, pl.col("tod_bucket") == ALL_BUCKETS
+    ).pivot(on="metric", index="model", values="value")
+    typer.echo(f"{'model':<24}{'MAE':>8}{'RMSE':>8}{'MAPE%':>8}{'pinball':>9}{'cover%':>8}")
+    for row in overall.iter_rows(named=True):
+        typer.echo(
+            f"{row['model']:<24}{row['mae']:>8.0f}{row['rmse']:>8.0f}{row['mape']:>8.1f}"
+            f"{row['pinball_avg']:>9.1f}{row['coverage_80']:>8.1f}"
+        )
+    typer.echo(f"Report: {path}")
 
 
 @app.command()

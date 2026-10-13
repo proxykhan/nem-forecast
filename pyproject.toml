@@ -15,8 +15,10 @@ classifiers = [
 dependencies = [
     "evidently",
     "fastapi",
+    "holidays>=0.106",
     "httpx",
     "lightgbm",
+    "matplotlib>=3.11.2",
     "mlflow",
     "pandas",
     "polars",

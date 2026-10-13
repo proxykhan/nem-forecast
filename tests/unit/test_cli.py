@@ -38,8 +38,6 @@ def test_version() -> None:
 @pytest.mark.parametrize(
     ("command", "phase"),
     [
-        ("build-features", 2),
-        ("backtest", 2),
         ("train", 3),
         ("serve", 4),
         ("monitor", 6),
