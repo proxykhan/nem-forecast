@@ -137,7 +137,8 @@ def render_model_card(
         "",
         "## Evaluation",
         "",
-        f"Walk-forward backtest over {eval_start:%Y-%m-%d} to {eval_end:%Y-%m-%d}: expanding "
+        f"Walk-forward backtest over {eval_start.astimezone(NEM_TZ):%Y-%m-%d} to "
+        f"{eval_end.astimezone(NEM_TZ):%Y-%m-%d} (market time): expanding "
         "window, refit every 30 days, a forecast from every half-hourly origin. The same "
         "forecasts were made by every baseline.",
         "",
@@ -164,11 +165,15 @@ def render_model_card(
         bold = "**" if model == name else ""
         lines.append(f"| {bold}`{model}`{bold} | {cells} | {value(model, 'pinball_avg'):,.1f} |")
 
-    calibration = (
-        "close to its nominal 80%"
-        if abs(coverage - 80) <= 3
-        else ("too narrow" if coverage < 80 else "too wide")
-    )
+    if abs(coverage - 80) <= 3:
+        calibration = "close to its nominal 80%"
+    elif coverage < 80:
+        calibration = (
+            "against a nominal 80%: the interval is too narrow, so treat p10 and p90 as "
+            "optimistic bounds rather than calibrated ones"
+        )
+    else:
+        calibration = "against a nominal 80%: the interval is wider than it needs to be"
     lines += [
         "",
         "## Known failure modes",
@@ -178,6 +183,9 @@ def render_model_card(
         "solar depends on cloud cover and demand on temperature, and the model sees neither.",
         f"- **Interval calibration.** The 10-90 interval contained {coverage:.1f}% of actual "
         f"demand in the backtest, {calibration}.",
+        "- **Horizon-group seams.** Each group of horizons (1 | 2-3 | 4-6 | 7-12 | 13-24 | 25-48 "
+        "half-hours) has its own model, so error can step slightly where one hands over to the "
+        "next.",
         "- **Rare days.** Victoria has about 13 public holidays a year, so holiday behaviour rests "
         "on few examples; unusual events (heatwaves, storms, market interventions) on fewer.",
         "- **Structural change.** Growth in rooftop solar and batteries keeps reshaping the "
@@ -189,7 +197,9 @@ def render_model_card(
         "## Files and loading",
         "",
         "`model.json` holds the metadata, feature list, horizon groups and interval offsets; each "
-        "`group_*.txt` is a LightGBM booster in its plain-text format. Nothing is pickled.",
+        "`group_*.txt` is a LightGBM booster in its plain-text format. Nothing is pickled. "
+        "Loading and building features need the project's package "
+        f"(`pip install git+{GITHUB_REPO}`).",
         "",
         "```python",
         "from pathlib import Path",

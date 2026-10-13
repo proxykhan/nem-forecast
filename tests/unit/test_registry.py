@@ -54,6 +54,9 @@ def test_card_carries_every_required_section(recorded: pl.DataFrame) -> None:
         assert section in card
     assert "**Version:** `0123456789abcdef0123456789abcdef01234567`" in card
     assert "2023-10-01 10:30 to 2026-10-13 23:00" in card  # trained range in market time
+    assert "## Known failure modes" in card
+    assert "Horizon-group seams" in card
+    assert "pip install git+https://github.com/proxykhan/nem-forecast" in card
     assert "seasonal naive" in card  # the verdict line, win or lose
     for baseline in BASELINES:
         assert f"`{baseline.name}`" in card

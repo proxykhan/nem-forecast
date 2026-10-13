@@ -35,6 +35,9 @@ def configure_mlflow(settings: Settings) -> str:
         # whichever directory first opened it.
         uri = f"sqlite:///{LOCAL_STORE.resolve().as_posix()}"
         log.warning("MLFLOW_TRACKING_URI is not set; tracking to %s", uri)
+    # One "View run at ..." line per run floods the CLI during a backtest; runs are linked from
+    # the report and model_runs instead.
+    os.environ.setdefault("MLFLOW_SUPPRESS_PRINTING_URL_TO_STDOUT", "true")
     mlflow.set_tracking_uri(uri)
     return uri
 
