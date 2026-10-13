@@ -15,7 +15,7 @@ API that logs every forecast, and monitoring that scores those forecasts against
 | 0 | Scaffold: layout, config, domain schemas, SQL migrations, CLI, CI | ✅ Done |
 | 1 | Ingestion: NEMWeb client, record-type parser, idempotent upsert with revision history, backfill | ✅ Done |
 | 2 | Features and backtesting: leakage-safe features, baselines, walk-forward harness | ✅ Done |
-| 3 | Models and tracking: Ridge, LightGBM, quantile LightGBM, Optuna, DagsHub MLflow, HF Hub registry | ⬜ Not started |
+| 3 | Models and tracking: Ridge, LightGBM, quantile LightGBM, Optuna, DagsHub MLflow, HF Hub registry | ✅ Done |
 | 4 | Serving: FastAPI, prediction logging, Docker | ⬜ Not started |
 | 5 | Deployment and CI/CD: Render, hardened CI, nightly backtest | ⬜ Not started |
 | 6 | Monitoring and retraining: realised-error scoring, Evidently drift, gated retraining, dashboard | ⬜ Not started |
@@ -116,8 +116,6 @@ bucket. Runs and metrics are saved to `model_runs` and `model_run_metrics`.
 | Mean of the same half-hour on the last 4 same weekdays | **502** | **10.9** | **177.8** | 74.7 |
 | Persistence: last observed value, held flat | 970 | 20.8 | 300.0 | 79.7 |
 
-![MAE by horizon](docs/backtest/mae_by_horizon.png)
-
 What the baselines show:
 
 - **The three seasonal baselines are flat across horizons by construction.** Each reads a fixed
@@ -134,7 +132,94 @@ What the baselines show:
   coverage against a nominal 80%. Averaging four weeks smooths the point forecast, which makes
   its recent errors less representative of the next ones.
 
-Re-run with `uv run nem-forecast build-features` and `uv run nem-forecast backtest`.
+Re-run with `uv run nem-forecast build-features` and `uv run nem-forecast backtest --no-models`.
+
+## Models and results
+
+Three models, all **direct** multi-horizon (one sub-model per horizon group, never feeding their
+own forecasts back in), trained on the same leakage-checked features and scored in the same
+walk-forward backtest as the baselines:
+
+- **Ridge regression**: standardised lags and one-hot calendar; the linear reference point.
+- **LightGBM direct**: squared error, one model per horizon group (1 | 2-3 | 4-6 | 7-12 | 13-24 |
+  25-48 half-hours). Its intervals come from its own errors on the 28 days before each refit,
+  predicted by a copy trained without them, so they are out-of-sample.
+- **LightGBM quantile**: quantile regression at 0.1 / 0.5 / 0.9, same groups.
+
+Hyperparameters were tuned with Optuna (50 trials) on a validation split, 2025-08-14 to
+2025-10-13, that ends where the backtest begins; validation MAE improved from 374.5 to 360.9 MW
+([parameters](config/lightgbm_vic1.json)). Every trial, every model and every walk-forward fold
+is logged to [MLflow on DagsHub](https://dagshub.com/proxykhan/nem-forecast.mlflow/#/experiments)
+with its parameters, metrics by horizon, feature list, data range, git SHA and the report.
+
+**Results**, 2025-10-13 to 2026-10-13, 842,040 forecasts per model
+([full report](docs/backtest/README.md)):
+
+| Model | Kind | MAE (MW) | MAPE (%) | Pinball avg (MW) | 10-90 coverage (%) |
+|---|---|--:|--:|--:|--:|
+| **LightGBM quantile** | model | **351** | **7.6** | **114.3** | 68.5 |
+| LightGBM direct | model | 353 | 7.6 | 124.1 | 77.0 |
+| Ridge | model | 383 | 8.3 | 131.3 | 77.8 |
+| 4-week same-weekday mean | baseline | 502 | 10.9 | 177.8 | 74.7 |
+| Seasonal naive | baseline | 506 | 11.0 | 179.0 | 80.0 |
+| Weekly seasonal naive | baseline | 592 | 13.0 | 209.8 | 79.4 |
+| Persistence | baseline | 970 | 20.8 | 300.0 | 79.7 |
+
+**MAE (MW) by horizon**
+
+| Model | 30 min | 1 h | 2 h | 3 h | 6 h | 12 h | 18 h | 24 h |
+|---|--:|--:|--:|--:|--:|--:|--:|--:|
+| LightGBM quantile | **103** | 162 | 246 | 289 | **360** | **370** | **377** | **387** |
+| LightGBM direct | **103** | **160** | **242** | **285** | **360** | 375 | 380 | 393 |
+| Ridge | 132 | 209 | 297 | 358 | 408 | 406 | 404 | 404 |
+| Seasonal naive | 507 | 507 | 507 | 507 | 507 | 506 | 506 | 506 |
+| Weekly seasonal naive | 592 | 592 | 592 | 592 | 592 | 592 | 592 | 593 |
+| 4-week same-weekday mean | 502 | 502 | 502 | 502 | 502 | 502 | 502 | 502 |
+| Persistence | 170 | 324 | 600 | 830 | 1,181 | 996 | 1,196 | 506 |
+
+**Pinball loss, average of q10/q50/q90 (MW), by horizon**
+
+| Model | 30 min | 1 h | 2 h | 3 h | 6 h | 12 h | 18 h | 24 h |
+|---|--:|--:|--:|--:|--:|--:|--:|--:|
+| LightGBM quantile | **36** | **54** | **80** | **94** | **117** | **121** | **123** | **126** |
+| LightGBM direct | **36** | 55 | 84 | 100 | 127 | 131 | 134 | 139 |
+| Ridge | 45 | 71 | 101 | 121 | 139 | 139 | 139 | 139 |
+| Seasonal naive | 179 | 179 | 179 | 179 | 179 | 179 | 179 | 179 |
+| Weekly seasonal naive | 210 | 210 | 210 | 210 | 210 | 210 | 210 | 210 |
+| 4-week same-weekday mean | 178 | 178 | 178 | 178 | 178 | 178 | 178 | 178 |
+| Persistence | 53 | 101 | 186 | 255 | 359 | 307 | 367 | 179 |
+
+![MAE by horizon](docs/backtest/mae_by_horizon.png)
+
+What this does and does not show:
+
+- **Every model beats seasonal naive, and the best baseline, at all 48 horizons.** The report
+  computes this per horizon rather than asserting it. The margin narrows with distance: LightGBM
+  is 80% better than seasonal naive at 30 minutes and 24% better a day ahead, where, without
+  weather inputs, there is little to know beyond the calendar and the recent level.
+- **The LightGBM quantile intervals are too narrow.** Its 10-90 interval held 68.5% of actual
+  demand against a nominal 80%. It still has the best pinball loss because its intervals are
+  sharp, but its p10 and p90 are optimistic. LightGBM direct's held-out intervals are better
+  calibrated (77.0%).
+- **Tuning bought little.** 50 trials improved validation MAE by 3.6%; the features matter far
+  more than the hyperparameters.
+- **The midday solar trough is still the hardest period**, at about 600 MW MAE against 171 MW
+  overnight. Cloud cover drives rooftop solar, and no model here can see it.
+- **Error steps slightly at horizon-group boundaries**, a side effect of one model per group.
+
+**Registry.** The LightGBM quantile model, trained on all data to 2026-10-13, is published on
+Hugging Face as [Azharkhan79/nem-forecast-vic1](https://huggingface.co/Azharkhan79/nem-forecast-vic1),
+tagged with the git SHA of the code that trained it. Its
+[model card](https://huggingface.co/Azharkhan79/nem-forecast-vic1) is generated from the recorded
+backtest metrics: training range, features, comparison with every baseline by horizon, known
+failure modes and intended use. The files are JSON plus LightGBM's plain-text booster format;
+nothing is pickled. Promotion refuses uncommitted code.
+
+```bash
+uv run nem-forecast tune                                         # Optuna, logged to MLflow
+uv run nem-forecast backtest                                     # baselines + models, saved and tracked
+uv run nem-forecast train --model lightgbm_quantile --promote    # train on all data, publish
+```
 
 ## Database
 
