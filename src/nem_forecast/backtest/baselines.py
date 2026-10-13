@@ -26,16 +26,10 @@ from typing import ClassVar, Protocol
 
 import polars as pl
 
-from nem_forecast.features.build import (
-    DEFAULT_HORIZONS,
-    KEYS,
-    LABEL,
-    assert_no_leakage,
-    build_features,
-)
+from nem_forecast.backtest.intervals import ResidualIntervals
+from nem_forecast.features.build import DEFAULT_HORIZONS, KEYS, assert_no_leakage, build_features
 from nem_forecast.features.series import span
 
-QUANTILES = (0.1, 0.5, 0.9)
 PREDICTIONS = ("p10", "p50", "p90")
 INTERVAL_WINDOW = timedelta(days=90)
 
@@ -50,15 +44,20 @@ class Forecaster(Protocol):
 
 
 class RuleBaseline:
-    """A point forecast read straight from one feature, with empirical error quantiles."""
+    """A point forecast read straight from one feature, with empirical error quantiles.
+
+    A fixed rule has nothing to fit, so its errors over the 90 days before the cutoff are
+    already out-of-sample.
+    """
 
     name: ClassVar[str]
     point: ClassVar[str]
     description: ClassVar[str]
+    kind: ClassVar[str] = "baseline"
 
     def __init__(self, horizons: tuple[int, ...] = DEFAULT_HORIZONS) -> None:
         self._horizons = horizons
-        self._offsets: pl.DataFrame | None = None
+        self._intervals = ResidualIntervals()
 
     def fit(self, history: pl.DataFrame) -> None:
         _, cutoff = span(history)
@@ -68,33 +67,17 @@ class RuleBaseline:
         )["period_end"]
         frame = build_features(history, origins, self._horizons)
         assert_no_leakage(frame)
-        errors = frame.drop_nulls([LABEL, self.point]).select(
-            "horizon", (pl.col(LABEL) - pl.col(self.point)).alias("error")
-        )
-        if errors.is_empty():
+        try:
+            self._intervals.fit(frame, self.point)
+        except ValueError as exc:
             raise ValueError(
                 f"{self.name}: not enough history before {cutoff} to estimate intervals"
-            )
-        self._offsets = errors.group_by("horizon").agg(
-            pl.col("error").quantile(QUANTILES[0]).alias("_lower"),
-            pl.col("error").quantile(QUANTILES[2]).alias("_upper"),
-        )
+            ) from exc
 
     def predict(self, features: pl.DataFrame) -> pl.DataFrame:
-        if self._offsets is None:
+        if not self._intervals.fitted:
             raise RuntimeError(f"{self.name}: call fit() before predict()")
-        point = pl.col(self.point)
-        # A biased rule can have both error quantiles on one side of zero; clip so the
-        # interval always contains the point forecast (p10 <= p50 <= p90).
-        return (
-            features.join(self._offsets, on="horizon", how="left")
-            .with_columns(
-                p50=point,
-                p10=pl.min_horizontal(point + pl.col("_lower"), point),
-                p90=pl.max_horizontal(point + pl.col("_upper"), point),
-            )
-            .select(*KEYS, *PREDICTIONS)
-        )
+        return self._intervals.apply(features, self.point).select(*KEYS, *PREDICTIONS)
 
 
 class SeasonalNaive(RuleBaseline):

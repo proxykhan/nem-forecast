@@ -17,9 +17,11 @@ import json
 import logging
 import time
 import uuid
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
+from functools import partial
+from typing import Protocol
 
 import polars as pl
 from sqlalchemy import Engine, text
@@ -65,10 +67,26 @@ class BacktestResult:
     eval_start: datetime
     eval_end: datetime
     descriptions: dict[str, str] = field(default_factory=dict)
+    kinds: dict[str, str] = field(default_factory=dict)  # model -> "baseline" | "model"
 
 
 class HarnessError(RuntimeError):
     pass
+
+
+class BacktestObserver(Protocol):
+    """Hooks for experiment tracking; the harness itself knows nothing about MLflow."""
+
+    def start_model(self, forecaster: Forecaster) -> None: ...
+
+    def end_fold(self, forecaster: Forecaster, fold: Fold, predictions: pl.DataFrame) -> None: ...
+
+    def end_model(self, forecaster: Forecaster, predictions: pl.DataFrame) -> None: ...
+
+    def abort_model(self, forecaster: Forecaster) -> None: ...
+
+
+FoldCallback = Callable[[Fold, pl.DataFrame], None]
 
 
 def plan_folds(series: pl.DataFrame, config: BacktestConfig) -> list[Fold]:
@@ -87,7 +105,10 @@ def plan_folds(series: pl.DataFrame, config: BacktestConfig) -> list[Fold]:
 
 
 def walk_forward(
-    series: pl.DataFrame, forecaster: Forecaster, config: BacktestConfig
+    series: pl.DataFrame,
+    forecaster: Forecaster,
+    config: BacktestConfig,
+    on_fold: FoldCallback | None = None,
 ) -> pl.DataFrame:
     """Predictions for every fold: keys, actual demand, half_hour, p10/p50/p90, model, fold."""
     outputs = []
@@ -108,11 +129,15 @@ def walk_forward(
         predicted = forecaster.predict(frame.drop(LABEL))
         _check_predictions(predicted, frame, forecaster.name)
 
-        outputs.append(
+        scored = (
             frame.select(*KEYS, LABEL, "half_hour")
             .join(predicted.select(*KEYS, *PREDICTIONS), on=list(KEYS), how="left")
             .with_columns(model=pl.lit(forecaster.name), fold=pl.lit(fold.number, pl.Int16))
+            .filter(pl.col(LABEL).is_not_null())
         )
+        if on_fold is not None:
+            on_fold(fold, scored)
+        outputs.append(scored)
         log.info(
             "%s fold %d: trained to %s, %d origins, %.1fs",
             forecaster.name,
@@ -121,14 +146,33 @@ def walk_forward(
             len(origins),
             time.perf_counter() - started,
         )
-    return pl.concat(outputs).filter(pl.col(LABEL).is_not_null())
+    return pl.concat(outputs)
 
 
 def run_backtest(
-    series: pl.DataFrame, forecasters: Sequence[Forecaster], config: BacktestConfig
+    series: pl.DataFrame,
+    forecasters: Sequence[Forecaster],
+    config: BacktestConfig,
+    *,
+    observer: BacktestObserver | None = None,
 ) -> BacktestResult:
     folds = plan_folds(series, config)
-    predictions = pl.concat([walk_forward(series, f, config) for f in forecasters])
+    per_model = []
+    for forecaster in forecasters:
+        if observer is None:
+            per_model.append(walk_forward(series, forecaster, config))
+            continue
+        observer.start_model(forecaster)
+        try:
+            predictions = walk_forward(
+                series, forecaster, config, on_fold=partial(observer.end_fold, forecaster)
+            )
+        except BaseException:
+            observer.abort_model(forecaster)
+            raise
+        observer.end_model(forecaster, predictions)
+        per_model.append(predictions)
+    predictions = pl.concat(per_model)
     eval_end = predictions["target"].max()
     if not isinstance(eval_end, datetime):
         raise HarnessError("the backtest produced no scored forecasts")
@@ -141,6 +185,7 @@ def run_backtest(
         eval_start=folds[0].cutoff,
         eval_end=eval_end,
         descriptions={f.name: getattr(f, "description", "") for f in forecasters},
+        kinds={f.name: getattr(f, "kind", "model") for f in forecasters},
     )
 
 
@@ -151,36 +196,42 @@ def save_results(
     region: Region,
     git_sha: str | None,
     started_at: datetime,
-    model_kind: str = "baseline",
+    mlflow_run_ids: dict[str, str] | None = None,
+    params: dict[str, dict[str, object]] | None = None,
 ) -> dict[str, uuid.UUID]:
     """One model_runs row per model plus its tidy metrics, in one transaction."""
     run_ids: dict[str, uuid.UUID] = {}
     with engine.begin() as conn:
         for model in result.metrics["model"].unique(maintain_order=True):
             run_id = uuid.uuid4()
-            params = {**asdict(result.config), "description": result.descriptions.get(model, "")}
+            run_params = {
+                **asdict(result.config),
+                "description": result.descriptions.get(model, ""),
+                **(params or {}).get(model, {}),
+            }
             conn.execute(
                 text(
                     "INSERT INTO model_runs (run_id, model_name, model_kind, run_type, region, "
                     "git_sha, feature_version, params, train_start, train_end, eval_start, "
-                    "eval_end, status, started_at, finished_at) VALUES (:run_id, :model, :kind, "
-                    "'backtest', :region, :git_sha, :feature_version, CAST(:params AS JSONB), "
-                    ":train_start, :train_end, :eval_start, :eval_end, 'succeeded', :started_at, "
-                    "now())"
+                    "eval_end, status, started_at, finished_at, mlflow_run_id) VALUES (:run_id, "
+                    ":model, :kind, 'backtest', :region, :git_sha, :feature_version, "
+                    "CAST(:params AS JSONB), :train_start, :train_end, :eval_start, :eval_end, "
+                    "'succeeded', :started_at, now(), :mlflow_run_id)"
                 ),
                 {
                     "run_id": run_id,
                     "model": model,
-                    "kind": model_kind,
+                    "kind": result.kinds.get(model, "model"),
                     "region": region.value,
                     "git_sha": git_sha,
                     "feature_version": FEATURE_VERSION,
-                    "params": json.dumps(params),
+                    "params": json.dumps(run_params),
                     "train_start": result.train_start,
                     "train_end": result.folds[-1].cutoff,
                     "eval_start": result.eval_start,
                     "eval_end": result.eval_end,
                     "started_at": started_at,
+                    "mlflow_run_id": (mlflow_run_ids or {}).get(model),
                 },
             )
             rows = result.metrics.filter(pl.col("model") == model).drop("model")

@@ -38,7 +38,6 @@ def test_version() -> None:
 @pytest.mark.parametrize(
     ("command", "phase"),
     [
-        ("train", 3),
         ("serve", 4),
         ("monitor", 6),
     ],

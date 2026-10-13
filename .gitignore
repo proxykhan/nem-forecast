@@ -25,6 +25,8 @@ htmlcov/
 data/
 mlruns/
 mlartifacts/
+mlflow.db
+artifacts/
 *.parquet
 *.joblib
 *.pkl

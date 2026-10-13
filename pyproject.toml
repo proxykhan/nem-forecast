@@ -17,9 +17,11 @@ dependencies = [
     "fastapi",
     "holidays>=0.106",
     "httpx",
+    "huggingface-hub>=2.2.0",
     "lightgbm",
     "matplotlib>=3.11.2",
     "mlflow",
+    "optuna>=5.0.0",
     "pandas",
     "polars",
     "psycopg[binary]>=3.2",
@@ -71,7 +73,7 @@ select = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["S101"]
+"tests/**" = ["S101", "S105", "S106"]  # asserts, and fake credentials in fixtures
 
 [tool.mypy]
 python_version = "3.12"
