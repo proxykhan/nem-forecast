@@ -1,0 +1,19 @@
+{
+  "params": {
+    "learning_rate": 0.026736931633951293,
+    "num_leaves": 29,
+    "min_data_in_leaf": 56,
+    "feature_fraction": 0.5178452893451345,
+    "bagging_fraction": 0.7682558854276085,
+    "lambda_l2": 0.01337799672769819,
+    "num_boost_round": 950
+  },
+  "validation_mae": 360.88903142237825,
+  "trials": 50,
+  "split": {
+    "train_end": "2025-08-14T00:00:00+10:00",
+    "valid_end": "2025-10-13T00:00:00+10:00"
+  },
+  "git_sha": "6e4b8bafb2501416728a22671789fd82a374b66a",
+  "tuned_at": "2026-10-13T14:45:55.464798+00:00"
+}
