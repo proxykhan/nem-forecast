@@ -1,0 +1,32 @@
+{
+  "region": "VIC1",
+  "computed_at": "2026-10-14T14:32:48.644986+00:00",
+  "git_sha": "a65ad57442d97779db12c11a1ae7c741922a6428",
+  "quantile": 0.991,
+  "target_alarm_rate": 0.05,
+  "achieved_alarm_rate": 0.0577,
+  "default_alarm_rate": 1.0,
+  "thresholds": {
+    "demand_at_origin": 0.7718,
+    "same_slot_prev_day": 0.7459,
+    "same_slot_prev_week": 0.7713,
+    "same_slot_mean_4w": 0.5,
+    "rolling_mean_24h": 1.5513,
+    "rolling_std_24h": 1.3486,
+    "rolling_mean_7d": 3.2691,
+    "demand": 0.7708
+  },
+  "weeks": 104,
+  "first_week_end": "2024-10-23T13:30:00+00:00",
+  "last_week_end": "2026-10-14T13:30:00+00:00",
+  "median_scores": {
+    "demand_at_origin": 0.2436,
+    "same_slot_prev_day": 0.2078,
+    "same_slot_prev_week": 0.2456,
+    "same_slot_mean_4w": 0.2018,
+    "rolling_mean_24h": 0.4891,
+    "rolling_std_24h": 0.4409,
+    "rolling_mean_7d": 0.8063,
+    "demand": 0.2434
+  }
+}
