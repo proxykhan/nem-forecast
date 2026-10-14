@@ -79,3 +79,42 @@ def test_report_with_models_states_a_verdict_for_each(tmp_path: Path) -> None:
     assert "`mlflow-run-1`" in text
     assert "| `ridge` | model |" in text
     assert _ranges([1, 2, 3, 7, 9, 10]) == "1-3, 7, 9-10"
+
+
+def test_readme_results_block_is_replaced_between_markers(tmp_path: Path) -> None:
+    from nem_forecast.backtest.report import (
+        README_END,
+        README_START,
+        render_results_block,
+        update_readme,
+    )
+
+    result = run_backtest(
+        series(days=60, noise_sd=100.0),
+        [b() for b in BASELINES],
+        BacktestConfig(test_days=6, refit_every_days=3),
+    )
+    readme = tmp_path / "README.md"
+    readme.write_text(f"# Title\n\nintro\n{README_START}\nold numbers\n{README_END}\n\nrest\n")
+
+    update_readme(
+        readme, render_results_block(result, generated_at=datetime(2026, 10, 14, tzinfo=UTC))
+    )
+    text = readme.read_text(encoding="utf-8")
+
+    assert "old numbers" not in text
+    assert text.startswith("# Title\n\nintro\n")
+    assert text.endswith(f"{README_END}\n\nrest\n")
+    assert "| Seasonal naive | baseline |" in text
+    assert "**MAE (MW) by horizon**" in text
+    assert "last run 2026-10-14" in text
+
+
+def test_readme_without_markers_is_refused(tmp_path: Path) -> None:
+    from nem_forecast.backtest.report import update_readme
+
+    readme = tmp_path / "README.md"
+    readme.write_text("# no markers\n")
+
+    with pytest.raises(ValueError, match="results:start"):
+        update_readme(readme, "table")

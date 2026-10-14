@@ -1,24 +1,44 @@
 name: CI
 
+# Runs on every pull request, and is called by the CD workflow on every push to main, so a
+# deploy only ever follows a green run of exactly these checks.
+
 on:
-  push:
-    branches: [main]
   pull_request:
+  workflow_call:
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  checks:
+  lint:
+    name: Lint and type check
     runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.0
+        with:
+          enable-cache: true
+      - run: uv sync --locked --all-extras --all-groups
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run mypy
+
+  test:
+    name: Tests (Python ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.12", "3.13"]
     env:
       ENVIRONMENT: ci
-      # Integration tests (idempotent upserts, revisions, backfill resume) run against this
-      # service and must not silently skip.
+      # Integration tests (database, API, backfill, migrations) run against this service and
+      # must not silently skip.
       REQUIRE_POSTGRES: "1"
       TEST_PG_HOST: localhost
       TEST_PG_PORT: "5432"
@@ -38,23 +58,47 @@ jobs:
           --health-retries 10
     steps:
       - uses: actions/checkout@v7
-
       - uses: astral-sh/setup-uv@v10.3.0
         with:
           enable-cache: true
+          python-version: ${{ matrix.python }}
+      - run: uv sync --locked --all-extras --all-groups
+      # Fails under 80% ([tool.coverage.report] fail_under).
+      - run: uv run pytest --cov --cov-report=term-missing --cov-report=xml --cov-report=html
+      - name: Coverage total
+        run: uv run coverage report --format=total > coverage-total.txt && cat coverage-total.txt
+      - uses: actions/upload-artifact@v7
+        with:
+          name: coverage-py${{ matrix.python }}
+          path: |
+            coverage.xml
+            coverage-total.txt
+            htmlcov/
+          retention-days: 30
 
-      - name: Install dependencies
-        run: uv sync --locked --all-extras --all-groups
+  audit:
+    name: Dependency vulnerabilities (pip-audit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.0
+      - name: Audit every locked dependency, extras included
+        run: |
+          uv export --frozen --all-extras --no-dev --no-emit-project \
+            --format requirements-txt -o requirements-audit.txt
+          ignores=$(grep -oE '^[A-Z]+-[0-9A-Za-z-]+' .github/pip-audit-ignore.txt | sed 's/^/--ignore-vuln /')
+          # shellcheck disable=SC2086 # word splitting intended for the flag list
+          uvx pip-audit --disable-pip --require-hashes -r requirements-audit.txt \
+            --progress-spinner off --desc on $ignores
 
-      - name: Lint
-        run: uv run ruff check .
-
-      - name: Format
-        run: uv run ruff format --check .
-
-      - name: Type check
-        run: uv run mypy
-
-      # Coverage threshold (80%) is enforced by [tool.coverage.report] fail_under.
-      - name: Test
-        run: uv run pytest --cov --cov-report=term-missing --cov-report=xml
+  secrets:
+    name: Committed secrets (gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # scan the whole history, not just the latest commit
+      - name: Scan history
+        run: >
+          docker run --rm -v "$PWD:/repo" zricethezav/gitleaks:v8.28.0
+          git /repo --no-banner --redact --verbose

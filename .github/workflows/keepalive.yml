@@ -1,0 +1,41 @@
+name: Keep-alive
+
+# Render's free tier spins a service down after 15 minutes without traffic, and a cold start
+# takes about a minute on its 0.1 CPU. Pinging /health every 10 minutes during Melbourne business
+# hours (08:00-18:00, Monday to Friday) keeps the API warm when people are likely to use it,
+# while spending only about 220 of the 750 free instance hours a month.
+#
+# GitHub cron runs in UTC and Melbourne moves between UTC+10 and UTC+11, so the schedule covers
+# both offsets and each run checks the actual Melbourne time before pinging.
+
+on:
+  schedule:
+    - cron: "*/10 21-23 * * 0-4" # previous UTC day: Mon-Fri 07:00-10:59 Melbourne
+    - cron: "*/10 0-7 * * 1-5" # same UTC day: Mon-Fri 10:00-18:59 Melbourne
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  ping:
+    if: vars.RENDER_SERVICE_URL != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Is it business hours in Melbourne?
+        id: hours
+        run: |
+          hour=$(TZ=Australia/Melbourne date +%-H)
+          weekday=$(TZ=Australia/Melbourne date +%u)
+          if [ "$weekday" -le 5 ] && [ "$hour" -ge 8 ] && [ "$hour" -lt 18 ]; then
+            echo "open=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "open=false" >> "$GITHUB_OUTPUT"
+            echo "Outside Melbourne business hours ($(TZ=Australia/Melbourne date '+%a %H:%M')); not pinging."
+          fi
+
+      - name: Ping /health
+        if: steps.hours.outputs.open == 'true'
+        run: >
+          curl -fsS --max-time 90 --retry 3 --retry-delay 20 --retry-all-errors
+          "${{ vars.RENDER_SERVICE_URL }}/health"

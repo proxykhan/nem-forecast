@@ -270,3 +270,55 @@ class TestModelCommands:
 
         assert result.exit_code == 2
         assert "choose one of" in plain(result.output)
+
+
+def test_old_backtests_are_pruned_but_training_runs_kept(engine: Engine) -> None:
+    from nem_forecast.backtest.harness import prune_backtests
+
+    with engine.begin() as conn:
+        for run_type, age in (("backtest", 40), ("backtest", 5), ("train", 400)):
+            conn.execute(
+                text(
+                    "INSERT INTO model_runs (model_name, model_kind, run_type, region, started_at) "
+                    "VALUES ('m', 'model', :type, 'VIC1', now() - make_interval(days => :age))"
+                ),
+                {"type": run_type, "age": age},
+            )
+
+    assert prune_backtests(engine, Region.VIC1, keep_days=30) == 1
+    remaining = sorted(
+        tuple(r) for r in engine.connect().execute(text("SELECT run_type FROM model_runs"))
+    )
+    assert remaining == [("backtest",), ("train",)]
+
+
+def test_nightly_options_prune_and_rewrite_the_readme(
+    with_dispatch: Engine, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("DATABASE_URL", with_dispatch.url.render_as_string(hide_password=False))
+    readme = tmp_path / "README.md"
+    readme.write_text("<!-- results:start -->\nstale\n<!-- results:end -->\n", encoding="utf-8")
+
+    result = CliRunner().invoke(
+        cli.app,
+        [
+            "backtest",
+            "--no-models",
+            "--test-days",
+            "7",
+            "--refit-every-days",
+            "3",
+            "--report-dir",
+            str(tmp_path / "report"),
+            "--no-fold-artifacts",
+            "--retain-days",
+            "30",
+            "--readme",
+            str(readme),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Pruned 0 backtest runs older than 30 days." in result.output
+    assert "stale" not in readme.read_text(encoding="utf-8")
+    assert "| Persistence | baseline |" in readme.read_text(encoding="utf-8")

@@ -1,0 +1,63 @@
+name: Nightly backtest
+
+# Re-runs the full walk-forward backtest (every baseline and model) on the latest data each
+# night, logs it to MLflow on DagsHub, records it in model_runs, and commits the refreshed report
+# and README results table, so the published numbers always describe the current data.
+#
+# The commit carries [skip ci], so it does not trigger CI or a deploy. It also counts as repository
+# activity, which keeps GitHub from disabling the scheduled workflows after 60 quiet days.
+
+on:
+  schedule:
+    - cron: "37 16 * * *" # 02:37 or 03:37 in Melbourne, after the overnight ingest
+  workflow_dispatch:
+
+permissions:
+  contents: write # commits the refreshed report
+
+concurrency:
+  group: nightly-backtest
+  cancel-in-progress: false
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    env:
+      ENVIRONMENT: production # refuses to fall back to a local MLflow store
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      MLFLOW_TRACKING_URI: ${{ secrets.MLFLOW_TRACKING_URI }}
+      MLFLOW_TRACKING_USERNAME: ${{ secrets.MLFLOW_TRACKING_USERNAME }}
+      MLFLOW_TRACKING_PASSWORD: ${{ secrets.MLFLOW_TRACKING_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v10.3.0
+        with:
+          enable-cache: true
+
+      - name: Install
+        run: uv sync --locked --no-dev --extra train
+
+      - name: Check configuration
+        run: |
+          for name in DATABASE_URL MLFLOW_TRACKING_URI MLFLOW_TRACKING_USERNAME MLFLOW_TRACKING_PASSWORD; do
+            if [ -z "${!name}" ]; then echo "::error::the $name secret is not set"; exit 1; fi
+          done
+
+      - name: Backtest
+        # Fold runs keep their metrics but only each model's parent run gets the report files,
+        # and runs older than 30 days are pruned, to stay inside free-tier storage.
+        run: >
+          uv run nem-forecast backtest
+          --retain-days 30 --no-fold-artifacts --readme README.md
+
+      - name: Commit the refreshed report
+        run: |
+          git add docs/backtest README.md
+          if git diff --cached --quiet; then echo "results unchanged"; exit 0; fi
+          git -c user.name="github-actions[bot]" \
+              -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+              commit --quiet -m "Nightly backtest $(date -u +%Y-%m-%d) [skip ci]"
+          git pull --quiet --rebase  # main may have moved during a long run
+          git push --quiet

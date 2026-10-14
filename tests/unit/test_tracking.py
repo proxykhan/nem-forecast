@@ -146,3 +146,27 @@ def test_flattened_metric_names() -> None:
 
     assert {"mae", "mae_h01", "mae_h48", "coverage_80", "mae_tod_16-21_evening_peak"} <= set(flat)
     assert not any("h01_tod" in name for name in flat)
+
+
+def test_report_can_skip_fold_runs(tmp_path: Path) -> None:
+    observer = MlflowBacktestObserver(
+        region=Region.VIC1,
+        config=CONFIG,
+        git_sha="abc1234",
+        data_span=span(DATA),
+        eval_start=plan_folds(DATA, CONFIG)[0].cutoff,
+    )
+    run_backtest(DATA, [SeasonalNaive()], CONFIG, observer=observer)
+    report = tmp_path / "README.md"
+    report.write_text("# report", encoding="utf-8")
+
+    observer.log_report([report], include_folds=False)
+
+    client = mlflow.MlflowClient()
+    assert [
+        a.path
+        for a in client.list_artifacts(observer.parent_runs["seasonal_naive"], REPORT_ARTIFACTS)
+    ] == [f"{REPORT_ARTIFACTS}/README.md"]
+    assert all(
+        client.list_artifacts(run_id, REPORT_ARTIFACTS) == [] for run_id in observer.child_runs
+    )

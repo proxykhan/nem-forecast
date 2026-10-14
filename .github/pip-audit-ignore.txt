@@ -1,0 +1,5 @@
+# Known vulnerabilities accepted after review. One advisory id per line, then the reason.
+# pip-audit fails CI on anything not listed here. Revisit each entry by its date.
+#
+# id               | package | why it is accepted                                   | revisit
+PYSEC-2026-3740    # nltk 3.10.3 (CVE-2026-81726): file-sandbox bypass in nltk's model save/load helpers (TransitionParser, PerceptronTagger). Pulled in only by Evidently in the optional `monitor` extra; this project never calls nltk; not installed in the serving image. No patched release exists yet. | 2027-01-01

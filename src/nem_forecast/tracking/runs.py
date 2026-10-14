@@ -129,11 +129,13 @@ class MlflowBacktestObserver:
     def abort_model(self, forecaster: Forecaster) -> None:
         mlflow.end_run(status="FAILED")
 
-    def log_report(self, paths: Iterable[Path]) -> None:
-        """Attach the backtest report to every run, parents and folds alike."""
+    def log_report(self, paths: Iterable[Path], *, include_folds: bool = True) -> None:
+        """Attach the backtest report to every model run, and to every fold run unless told not
+        to (the nightly run skips folds to stay inside free-tier artifact storage)."""
         client = mlflow.MlflowClient()
         files = list(paths)
-        for run_id in [*self.parent_runs.values(), *self.child_runs]:
+        runs = [*self.parent_runs.values(), *(self.child_runs if include_folds else [])]
+        for run_id in runs:
             for path in files:
                 client.log_artifact(run_id, str(path), artifact_path=REPORT_ARTIFACTS)
 

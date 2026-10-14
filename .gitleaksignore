@@ -1,0 +1,9 @@
+# Findings reviewed and confirmed not to be secrets. Each line is one exact finding (commit, file,
+# rule, line), so the same pattern anywhere else, or in any later commit, is still reported.
+#
+# tests/unit/test_config.py, first commit: invented values ("hf_Xq7pL2mN9vR4") used to prove that
+# Settings never prints secrets. They were never real credentials.
+dc0500df05ca50702889356e7d10dff585d10a8b:tests/unit/test_config.py:generic-api-key:24
+dc0500df05ca50702889356e7d10dff585d10a8b:tests/unit/test_config.py:generic-api-key:75
+dc0500df05ca50702889356e7d10dff585d10a8b:tests/unit/test_config.py:generic-api-key:79
+dc0500df05ca50702889356e7d10dff585d10a8b:tests/unit/test_config.py:generic-api-key:102

@@ -1,0 +1,160 @@
+name: CD
+
+# On every push to main: the full CI, then the Docker image is built and smoke-tested, then
+# Render deploys exactly this commit through its deploy hook, then the live service is checked
+# until it reports this commit and serves a forecast. Any failed step stops the chain and fails
+# the run.
+#
+# Needs the RENDER_DEPLOY_HOOK_URL secret and the RENDER_SERVICE_URL variable; until they exist,
+# the deploy and verify jobs are skipped and everything before them still runs.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cd-${{ github.ref }}
+  cancel-in-progress: true # a newer commit supersedes an older deploy
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+
+  image:
+    name: Build and smoke-test the image
+    needs: ci
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build
+        run: docker build --build-arg GIT_SHA=${{ github.sha }} -t nem-forecast-api:${{ github.sha }} .
+
+      - name: Image size
+        run: |
+          bytes=$(docker image inspect nem-forecast-api:${{ github.sha }} --format '{{.Size}}')
+          echo "Image: $((bytes / 1000000)) MB uncompressed" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Start the container (model pinned as in render.yaml)
+        run: |
+          repo=$(yq '.services[0].envVars[] | select(.key == "MODEL_REPO_ID") | .value' render.yaml)
+          revision=$(yq '.services[0].envVars[] | select(.key == "MODEL_REVISION") | .value' render.yaml)
+          docker run -d --name api --network host \
+            -e DATABASE_URL=postgresql://postgres:postgres@localhost:5432/postgres \
+            -e MODEL_REPO_ID="$repo" -e MODEL_REVISION="$revision" -e PORT=8000 \
+            nem-forecast-api:${{ github.sha }}
+
+      - name: Smoke test /health, /ready and /metrics
+        run: |
+          wait_for() {  # path, seconds
+            for _ in $(seq "$2"); do
+              [ "$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:8000$1")" = 200 ] && return 0
+              sleep 1
+            done
+            echo "::error::$1 did not return 200 within $2 s"; return 1
+          }
+          wait_for /health 60
+          wait_for /ready 180
+          curl -fsS http://127.0.0.1:8000/health | tee health.json
+          test "$(jq -r .service_git_sha health.json)" = "${{ github.sha }}"
+          curl -fsS http://127.0.0.1:8000/metrics | grep -q '^nem_forecast_model_info{'
+          echo "Image smoke test passed: live, ready, model $(jq -r .model.version health.json)" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Container logs
+        if: always()
+        run: docker logs api || true
+
+  badge:
+    name: Coverage badge
+    needs: ci
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # pushes coverage.json to the badges branch
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: coverage-py3.12
+      - name: Publish the shields.io endpoint JSON to the badges branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          total=$(cat coverage-total.txt)
+          if [ "$total" -ge 90 ]; then colour=brightgreen; elif [ "$total" -ge 80 ]; then colour=yellow; else colour=red; fi
+          git clone --quiet --single-branch --branch badges \
+            "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git" badges \
+            || { git init --quiet badges && git -C badges checkout --quiet -b badges \
+                 && git -C badges remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git"; }
+          cd badges
+          printf '{"schemaVersion": 1, "label": "coverage", "message": "%s%%", "color": "%s"}\n' "$total" "$colour" > coverage.json
+          git add coverage.json
+          if git diff --cached --quiet; then echo "coverage unchanged at ${total}%"; exit 0; fi
+          git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            commit --quiet -m "Coverage ${total}% at ${GITHUB_SHA::12}"
+          git push --quiet origin badges
+
+  deploy:
+    name: Deploy to Render
+    needs: image
+    if: vars.RENDER_SERVICE_URL != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment:
+      name: production
+      url: ${{ vars.RENDER_SERVICE_URL }}
+    env:
+      SERVICE_URL: ${{ vars.RENDER_SERVICE_URL }}
+    steps:
+      - name: Trigger the deploy hook for this exact commit
+        env:
+          HOOK: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
+        run: |
+          if [ -z "$HOOK" ]; then echo "::error::RENDER_DEPLOY_HOOK_URL secret is not set"; exit 1; fi
+          status=$(curl -s -o response.json -w '%{http_code}' -X POST "${HOOK}&ref=${GITHUB_SHA}")
+          echo "deploy hook answered HTTP $status"
+          case "$status" in 200|202) ;; *) cat response.json; exit 1 ;; esac
+
+      - name: Wait until the live service runs this commit
+        run: |
+          # A free instance builds the image and may also be spinning up from idle.
+          for _ in $(seq 120); do
+            sha=$(curl -s --max-time 90 "$SERVICE_URL/health" | jq -r '.service_git_sha // empty' || true)
+            if [ "$sha" = "$GITHUB_SHA" ]; then echo "live on ${GITHUB_SHA::12}"; exit 0; fi
+            echo "live service is on ${sha:-nothing yet}; waiting"
+            sleep 15
+          done
+          echo "::error::the live service never reported ${GITHUB_SHA}"; exit 1
+
+      - name: Post-deploy smoke test
+        run: |
+          for _ in $(seq 30); do
+            [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 60 "$SERVICE_URL/ready")" = 200 ] && break
+            sleep 10
+          done
+          curl -fsS --max-time 60 "$SERVICE_URL/ready"
+          curl -fsS --max-time 120 "$SERVICE_URL/forecast/latest" -o latest.json
+          points=$(jq '.points | length' latest.json)
+          version=$(jq -r .model_version latest.json)
+          test "$points" -gt 0
+          {
+            echo "### Deployed ${GITHUB_SHA::12}"
+            echo "- Service: $SERVICE_URL"
+            echo "- Model: $version"
+            echo "- Latest forecast: $points half-hours from $(jq -r .forecast_origin latest.json)"
+          } >> "$GITHUB_STEP_SUMMARY"

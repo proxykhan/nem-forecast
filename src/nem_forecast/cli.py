@@ -26,6 +26,7 @@ from nem_forecast.backtest.harness import (
     BacktestConfig,
     forecaster_params,
     plan_folds,
+    prune_backtests,
     run_backtest,
     save_results,
 )
@@ -289,9 +290,25 @@ def backtest(
     ),
     save: Annotated[bool, typer.Option(help="Record runs and metrics in model_runs.")] = True,
     track: Annotated[bool, typer.Option(help="Log runs to MLflow.")] = True,
+    fold_artifacts: Annotated[
+        bool, typer.Option(help="Attach the report to every fold run, not just each model's.")
+    ] = True,
+    retain_days: Annotated[
+        int | None,
+        typer.Option(min=1, help="After saving, delete backtest runs older than this many days."),
+    ] = None,
+    readme: Annotated[
+        Path | None, typer.Option(help="Rewrite the results section of this README.")
+    ] = None,
 ) -> None:
     """Walk-forward backtest of the baselines and models; writes model_runs and a report."""
-    from nem_forecast.backtest.report import CHART_NAME, verdict, write_report
+    from nem_forecast.backtest.report import (
+        CHART_NAME,
+        render_results_block,
+        update_readme,
+        verdict,
+        write_report,
+    )
     from nem_forecast.tracking.client import configure_mlflow
     from nem_forecast.tracking.runs import MlflowBacktestObserver
 
@@ -329,6 +346,9 @@ def backtest(
             if save
             else None
         )
+        if save and retain_days is not None:
+            pruned = prune_backtests(engine, region, keep_days=retain_days)
+            typer.echo(f"Pruned {pruned} backtest runs older than {retain_days} days.")
     path = write_report(
         result,
         report_dir,
@@ -339,7 +359,9 @@ def backtest(
         mlflow_runs=mlflow_runs,
     )
     if observer:
-        observer.log_report([path, path.parent / CHART_NAME])
+        observer.log_report([path, path.parent / CHART_NAME], include_folds=fold_artifacts)
+    if readme is not None:
+        update_readme(readme, render_results_block(result, generated_at=started))
 
     overall = result.metrics.filter(
         pl.col("horizon") == ALL_HORIZONS, pl.col("tod_bucket") == ALL_BUCKETS

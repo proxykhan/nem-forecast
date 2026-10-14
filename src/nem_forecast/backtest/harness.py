@@ -262,6 +262,23 @@ def forecaster_params(forecaster: Forecaster) -> dict[str, Any]:
     return params
 
 
+def prune_backtests(engine: Engine, region: Region, *, keep_days: int) -> int:
+    """Delete backtest runs (and their metrics) older than ``keep_days``; returns how many.
+
+    A nightly backtest writes about 16,000 metric rows; without pruning that would outgrow a
+    0.5 GB free database within a year. Training runs, which record promoted models, are kept.
+    """
+    with engine.begin() as conn:
+        deleted = conn.execute(
+            text(
+                "DELETE FROM model_runs WHERE run_type = 'backtest' AND region = :region "
+                "AND started_at < now() - make_interval(days => :days)"
+            ),
+            {"region": region.value, "days": keep_days},
+        ).rowcount
+    return int(deleted or 0)
+
+
 def _check_predictions(predicted: pl.DataFrame, frame: pl.DataFrame, name: str) -> None:
     missing = {*KEYS, *PREDICTIONS} - set(predicted.columns)
     if missing:
