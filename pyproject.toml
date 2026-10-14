@@ -40,6 +40,7 @@ train = [
 ]
 monitor = [
     "evidently",
+    "scipy",
 ]
 
 [project.scripts]
@@ -93,7 +94,7 @@ mypy_path = "src"
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
-module = ["evidently.*", "lightgbm.*", "mlflow.*", "sklearn.*"]
+module = ["evidently.*", "lightgbm.*", "mlflow.*", "pandas.*", "scipy.*", "sklearn.*"]
 ignore_missing_imports = true
 
 [tool.pydantic-mypy]

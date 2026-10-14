@@ -53,6 +53,10 @@ class Settings(BaseSettings):
     model_wait_seconds: float = 90.0  # how long a request waits for a model still loading
     git_sha: str | None = None  # commit of the running service, set at image build
 
+    # Monitoring and retraining: open alert issues. Both are provided by GitHub Actions.
+    github_token: SecretStr | None = None
+    github_repository: str | None = None  # "owner/repo"
+
     @field_validator("database_url", mode="before")
     @classmethod
     def _use_psycopg_driver(cls, value: object) -> object:

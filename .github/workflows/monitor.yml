@@ -1,0 +1,128 @@
+name: Monitor
+
+# Daily: score every served forecast whose actual has landed, check data, prediction and target
+# drift with Evidently, evaluate the alert thresholds, publish the report to GitHub Pages, and open
+# (or comment on) a GitHub issue for each breached check.
+#
+# An error or drift breach also starts the Retrain workflow. A volume breach (no forecasts for 6
+# hours) does not: that is an outage, and a new model would not fix it.
+#
+# Needs GitHub Pages set to deploy from GitHub Actions (Settings > Pages > Source).
+
+on:
+  schedule:
+    - cron: "23 20 * * *" # 06:23 or 07:23 Melbourne, after the nightly backtest
+  workflow_dispatch:
+    inputs:
+      open_issues:
+        description: "Open GitHub issues for breached checks"
+        type: boolean
+        default: true
+      allow_retrain:
+        description: "Start retraining if an error or drift check is breached"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: monitor
+  cancel-in-progress: false
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      issues: write # alert issues
+    env:
+      ENVIRONMENT: production
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      GITHUB_TOKEN: ${{ github.token }}
+      OPEN_ISSUES: ${{ github.event_name == 'schedule' || inputs.open_issues }}
+    outputs:
+      retrain: ${{ steps.monitor.outputs.retrain }}
+      breached: ${{ steps.monitor.outputs.breached }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v10.3.0
+        with:
+          enable-cache: true
+
+      - name: Install
+        run: uv sync --locked --no-dev --extra train --extra monitor
+
+      - name: Check configuration
+        run: |
+          if [ -z "$DATABASE_URL" ]; then echo "::error::the DATABASE_URL secret is not set"; exit 1; fi
+
+      - name: Apply migrations
+        run: uv run nem-forecast migrate
+
+      - name: Monitor the model pinned in render.yaml
+        id: monitor
+        run: |
+          MODEL_REPO_ID=$(yq '.services[0].envVars[] | select(.key == "MODEL_REPO_ID") | .value' render.yaml)
+          MODEL_REVISION=$(yq '.services[0].envVars[] | select(.key == "MODEL_REVISION") | .value' render.yaml)
+          export MODEL_REPO_ID MODEL_REVISION
+          owner=$(echo "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')
+          site_url="https://${owner}.github.io/${GITHUB_REPOSITORY#*/}"
+          flags=()
+          if [ "$OPEN_ISSUES" = "true" ]; then flags+=(--open-issues); fi
+          uv run nem-forecast monitor --site-dir site --site-url "$site_url" \
+            --run-url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            --summary summary.json "${flags[@]}"
+          echo "retrain=$(jq -r .retrain summary.json)" >> "$GITHUB_OUTPUT"
+          echo "breached=$(jq -r '.breached | join(", ")' summary.json)" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Monitoring ${MODEL_REVISION}"
+            jq -r '.checks[] | "- **\(.status)**: \(.title). \(.detail)"' site/status.json
+            echo "- Report: ${site_url}/"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Keep the report with the run
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: monitoring-report
+          path: site/
+          retention-days: 90
+          if-no-files-found: ignore
+
+      - name: Package the site for GitHub Pages
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: site/
+
+  publish:
+    name: Publish to GitHub Pages
+    needs: monitor
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v5
+
+  retrain:
+    name: Start retraining
+    needs: monitor
+    if: needs.monitor.outputs.retrain == 'true' && (github.event_name == 'schedule' || inputs.allow_retrain)
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write # dispatches the Retrain workflow
+    steps:
+      - name: Dispatch Retrain
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BREACHED: ${{ needs.monitor.outputs.breached }}
+        run: |
+          gh workflow run retrain.yml --repo "$GITHUB_REPOSITORY" --ref main -f trigger="alert: ${BREACHED}"
+          echo "Retraining started (alert: ${BREACHED})" >> "$GITHUB_STEP_SUMMARY"

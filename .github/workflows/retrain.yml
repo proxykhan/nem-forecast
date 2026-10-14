@@ -1,0 +1,119 @@
+name: Retrain
+
+# Retrains the served model's type on all data so far and promotes it only if it beats the served
+# model in every horizon group on a holdout neither model has trained on. Started by the Monitor
+# workflow when an error or drift check is breached, or by hand.
+#
+# There is no path to production around the comparison: `nem-forecast retrain --promote` uploads
+# a model only after the candidate has won, and checks the uploaded copy reproduces it. A rejected
+# candidate opens (or comments on) an issue naming the horizons that regressed.
+#
+# On promotion, the new release tag is written to render.yaml and committed. Render's Blueprint
+# sync applies it to the service, and CD is started to deploy and verify that the live service
+# serves exactly that model.
+#
+# Needs the HF_TOKEN secret: a Hugging Face token with write access to the model repository.
+
+on:
+  workflow_dispatch:
+    inputs:
+      trigger:
+        description: "Why: 'manual', or the alert that fired"
+        default: "manual"
+        required: true
+      promote:
+        description: "Promote the candidate if it wins"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: retrain
+  cancel-in-progress: false
+
+jobs:
+  retrain:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: write # commits the promoted model's tag to render.yaml
+      issues: write # explains a rejection
+      actions: write # starts CD after a promotion
+    env:
+      ENVIRONMENT: production
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      GITHUB_TOKEN: ${{ github.token }}
+      TRIGGER: ${{ inputs.trigger }}
+      PROMOTE: ${{ inputs.promote }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v10.3.0
+        with:
+          enable-cache: true
+
+      - name: Install
+        run: uv sync --locked --no-dev --extra train --extra monitor
+
+      - name: Check configuration
+        run: |
+          if [ -z "$DATABASE_URL" ]; then echo "::error::the DATABASE_URL secret is not set"; exit 1; fi
+          if [ "$PROMOTE" = "true" ] && [ -z "$HF_TOKEN" ]; then
+            echo "::error::the HF_TOKEN secret is not set; it is needed to promote"; exit 1
+          fi
+
+      - name: Apply migrations
+        run: uv run nem-forecast migrate
+
+      - name: Retrain behind the comparison gate
+        id: retrain
+        run: |
+          MODEL_REPO_ID=$(yq '.services[0].envVars[] | select(.key == "MODEL_REPO_ID") | .value' render.yaml)
+          MODEL_REVISION=$(yq '.services[0].envVars[] | select(.key == "MODEL_REVISION") | .value' render.yaml)
+          export MODEL_REPO_ID MODEL_REVISION
+          flags=(--open-issues)
+          if [ "$PROMOTE" = "true" ]; then flags+=(--promote); fi
+          uv run nem-forecast retrain --trigger "$TRIGGER" --summary retrain.json "${flags[@]}" \
+            | tee retrain.txt
+          echo "decision=$(jq -r .decision retrain.json)" >> "$GITHUB_OUTPUT"
+          echo "release=$(jq -r '.release // empty' retrain.json)" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Retraining: $(jq -r .decision retrain.json)"
+            echo
+            echo "Incumbent: ${MODEL_REVISION}. Trigger: ${TRIGGER}."
+            echo
+            cat retrain.txt
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Keep the comparison and the model with the run
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: retrain
+          path: |
+            retrain.json
+            artifacts/
+          retention-days: 30
+          if-no-files-found: ignore
+
+      - name: Point render.yaml at the promoted model
+        if: steps.retrain.outputs.decision == 'promoted'
+        env:
+          RELEASE: ${{ steps.retrain.outputs.release }}
+        run: |
+          yq -i '(.services[0].envVars[] | select(.key == "MODEL_REVISION") | .value) = strenv(RELEASE)' render.yaml
+          git add render.yaml
+          git -c user.name="github-actions[bot]" \
+              -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+              commit --quiet -m "Promote model ${RELEASE}" -m "It beat the previous model in every horizon group on a shared holdout (${TRIGGER})."
+          git pull --quiet --rebase
+          git push --quiet
+
+      - name: Deploy and verify through CD
+        if: steps.retrain.outputs.decision == 'promoted'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run cd.yml --repo "$GITHUB_REPOSITORY" --ref main

@@ -19,6 +19,8 @@ _CONFIG_ENV_VARS = (
     "MODEL_REVISION",
     "MODEL_DIR",
     "GIT_SHA",
+    "GITHUB_TOKEN",
+    "GITHUB_REPOSITORY",
 )
 
 

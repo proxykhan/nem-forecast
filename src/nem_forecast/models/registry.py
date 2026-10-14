@@ -1,8 +1,13 @@
 """Promote a trained model to Hugging Face Hub with a model card built from the recorded backtest.
 
 Every number on the card comes from the latest backtest of each model in model_run_metrics; none
-is typed by hand. Versions are git SHAs, and promotion refuses uncommitted code, because a model
-whose code cannot be checked out again cannot be audited.
+is typed by hand. Promotion refuses uncommitted code, because a model whose code cannot be checked
+out again cannot be audited.
+
+Each promoted model is tagged on the Hub with a release tag naming the end of its training data
+and the commit that trained it (``20261020-1430-3bff1a7``), because retraining on new data with
+unchanged code is the normal case. The first model was tagged with the bare 12-character SHA.
+A tag is never moved: promoting under an existing tag is refused.
 """
 
 from __future__ import annotations
@@ -12,11 +17,13 @@ from pathlib import Path
 from typing import Any
 
 import polars as pl
-from huggingface_hub import HfApi
+from huggingface_hub import HfApi, snapshot_download
 from sqlalchemy import Engine, text
 
 from nem_forecast.backtest.metrics import ALL_BUCKETS, ALL_HORIZONS, TOD_BUCKETS
 from nem_forecast.backtest.report import horizon_label, verdict_from_metrics
+from nem_forecast.models.base import DirectModel
+from nem_forecast.models.catalog import load_model
 from nem_forecast.schemas import NEM_TZ, Region
 
 GITHUB_REPO = "https://github.com/proxykhan/nem-forecast"
@@ -38,6 +45,11 @@ FROM latest l JOIN model_run_metrics m USING (run_id)
 
 class PromotionError(RuntimeError):
     pass
+
+
+def release_tag(sha: str, trained_to: datetime) -> str:
+    """Tag for a promoted model: end of its training data (market time), then the code's commit."""
+    return f"{trained_to.astimezone(NEM_TZ):%Y%m%d-%H%M}-{sha[:7]}"
 
 
 def repo_name(region: Region) -> str:
@@ -63,10 +75,17 @@ def latest_backtest(engine: Engine, region: Region) -> pl.DataFrame:
 
 
 def render_model_card(
-    metadata: dict[str, Any], backtest: pl.DataFrame, *, region: Region, repo_id: str
+    metadata: dict[str, Any],
+    backtest: pl.DataFrame,
+    *,
+    region: Region,
+    repo_id: str,
+    promotion_gate: str | None = None,
 ) -> str:
+    """The Hub model card; ``promotion_gate`` is markdown for the retraining comparison, if any."""
     name = metadata["name"]
     version = metadata["version"]
+    release = metadata.get("release") or version[:12]
     if backtest.filter(pl.col("model") == name).is_empty():
         raise PromotionError(f"no recorded backtest for {name}; run `nem-forecast backtest` first")
     kinds = dict(backtest.select("model", "kind").unique().iter_rows())
@@ -110,7 +129,7 @@ def render_model_card(
         f"interval. Part of [nem-forecast]({GITHUB_REPO}), where the training, evaluation and "
         "serving code lives.",
         "",
-        f"**Version:** `{version}`, the git commit of the code that trained it "
+        f"**Release:** `{release}`, trained by the code at commit `{version[:12]}` "
         f"([browse]({GITHUB_REPO}/tree/{version})).",
         "",
         "## Intended use",
@@ -176,6 +195,7 @@ def render_model_card(
         calibration = "against a nominal 80%: the interval is wider than it needs to be"
     lines += [
         "",
+        *([promotion_gate, ""] if promotion_gate else []),
         "## Known failure modes",
         "",
         f"- **No weather inputs.** Error is highest in the `{worst}` bucket "
@@ -206,7 +226,7 @@ def render_model_card(
         "from huggingface_hub import snapshot_download",
         "from nem_forecast.models.catalog import load_model",
         "",
-        f'path = snapshot_download("{repo_id}", revision="{version[:12]}")',
+        f'path = snapshot_download("{repo_id}", revision="{release}")',
         "model = load_model(Path(path))",
         "```",
         "",
@@ -214,21 +234,49 @@ def render_model_card(
     return "\n".join(lines)
 
 
-def push_to_hub(directory: Path, *, token: str, region: Region, version: str) -> str:
-    """Upload a saved model folder and tag the commit with the git SHA; returns the URL."""
+def push_to_hub(
+    directory: Path, *, token: str, region: Region, version: str, release: str | None = None
+) -> str:
+    """Upload a saved model folder and tag the commit; returns the URL of the tag.
+
+    The tag is ``release`` (or the SHA's first 12 characters). An existing tag is never moved:
+    it would silently change what every pinned deployment of that tag serves.
+    """
     if not version or version.endswith("-dirty") or version == "unknown":
         raise PromotionError(f"refusing to promote version {version!r}: commit your changes first")
+    tag = release or version[:12]
     api = HfApi(token=token)
     repo_id = f"{api.whoami()['name']}/{repo_name(region)}"
     api.create_repo(repo_id, repo_type="model", exist_ok=True, private=False)
+    if any(ref.name == tag for ref in api.list_repo_refs(repo_id, repo_type="model").tags):
+        raise PromotionError(f"{repo_id} already has a model tagged {tag}; tags are never moved")
     api.upload_folder(
         repo_id=repo_id,
         folder_path=directory,
-        commit_message=f"Promote {version[:12]}",
+        commit_message=f"Promote {tag}",
         repo_type="model",
     )
-    api.create_tag(repo_id, tag=version[:12], repo_type="model", exist_ok=True)
-    return f"https://huggingface.co/{repo_id}/tree/{version[:12]}"
+    api.create_tag(repo_id, tag=tag, repo_type="model")
+    return f"https://huggingface.co/{repo_id}/tree/{tag}"
+
+
+class HubPublisher:
+    """Publishes models to, and fetches them back from, the region's Hugging Face repository."""
+
+    def __init__(self, token: str, region: Region, *, cache_dir: Path) -> None:
+        self._token = token
+        self._region = region
+        self._cache_dir = cache_dir
+        self.repo_id = f"{HfApi(token=token).whoami()['name']}/{repo_name(region)}"
+
+    def publish(self, directory: Path, *, version: str, release: str) -> str:
+        return push_to_hub(
+            directory, token=self._token, region=self._region, version=version, release=release
+        )
+
+    def fetch(self, release: str) -> DirectModel:
+        path = snapshot_download(self.repo_id, revision=release, cache_dir=self._cache_dir)
+        return load_model(Path(path))
 
 
 def _wide_mae(backtest: pl.DataFrame) -> pl.DataFrame:

@@ -121,6 +121,11 @@ jobs:
     env:
       SERVICE_URL: ${{ vars.RENDER_SERVICE_URL }}
     steps:
+      - uses: actions/checkout@v7
+        with:
+          sparse-checkout: render.yaml
+          sparse-checkout-cone-mode: false
+
       - name: Trigger the deploy hook for this exact commit
         env:
           HOOK: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
@@ -152,6 +157,13 @@ jobs:
           points=$(jq '.points | length' latest.json)
           version=$(jq -r .model_version latest.json)
           test "$points" -gt 0
+          # The model comes from Render's environment, which its Blueprint sync sets from
+          # render.yaml; check the live service really serves the model this commit pins.
+          pinned=$(yq '.services[0].envVars[] | select(.key == "MODEL_REVISION") | .value' render.yaml)
+          if [ "$version" != "$pinned" ]; then
+            echo "::error::the live service serves model $version but render.yaml pins $pinned; check MODEL_REVISION in the Render dashboard"
+            exit 1
+          fi
           {
             echo "### Deployed ${GITHUB_SHA::12}"
             echo "- Service: $SERVICE_URL"

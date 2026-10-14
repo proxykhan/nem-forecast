@@ -56,6 +56,11 @@ CALIBRATION = timedelta(days=28)
 METADATA_FILE = "model.json"
 
 
+def horizon_group_label(group: tuple[int, ...]) -> str:
+    """``h1``, ``h2-3``, ... for a horizon group."""
+    return f"h{group[0]}" if len(group) == 1 else f"h{group[0]}-{group[-1]}"
+
+
 def training_frame(
     history: pl.DataFrame,
     *,
@@ -175,13 +180,18 @@ class DirectModel(ABC):
 
     # -- persistence ------------------------------------------------------------------------
 
-    def save(self, directory: Path, *, version: str) -> Path:
-        """Write the fitted model as JSON plus plain-text files: no pickle, safe to load."""
+    def save(self, directory: Path, *, version: str, release: str | None = None) -> Path:
+        """Write the fitted model as JSON plus plain-text files: no pickle, safe to load.
+
+        ``version`` is the git commit of the code that trained it; ``release`` is the tag the
+        model is published under, when it differs from the commit's first 12 characters.
+        """
         directory.mkdir(parents=True, exist_ok=True)
         metadata = {
             "name": self.name,
             "description": self.description,
             "version": version,
+            "release": release,
             "feature_version": FEATURE_VERSION,
             "features": list(FEATURES),
             "horizon_groups": [list(g) for g in self.horizon_groups],

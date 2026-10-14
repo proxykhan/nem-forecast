@@ -125,7 +125,7 @@ def build_features(
         same_slot_mean_4w=pl.mean_horizontal(weekly, ignore_nulls=False)
     ).drop(weekly)
 
-    frame = _with_calendar(frame)
+    frame = with_calendar(frame)
     if with_label:
         frame = frame.join(
             series.select(pl.col("period_end").alias("target"), pl.col("demand").alias(LABEL)),
@@ -234,7 +234,8 @@ def _lookup(frame: pl.DataFrame, stats: pl.DataFrame, source: str, feature: str)
     )
 
 
-def _with_calendar(frame: pl.DataFrame) -> pl.DataFrame:
+def with_calendar(frame: pl.DataFrame) -> pl.DataFrame:
+    """Add the calendar features of each row's ``target`` period (Melbourne wall-clock time)."""
     start_local = (pl.col("target") - PERIOD).dt.convert_time_zone(LOCAL_TIME_ZONE)
     frame = frame.with_columns(_local_start=start_local)
     years = frame.select(pl.col("_local_start").dt.year().unique())["_local_start"].to_list()

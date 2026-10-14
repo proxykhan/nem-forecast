@@ -46,7 +46,7 @@ class ModelState(StrEnum):
 class LoadedModel:
     model: DirectModel
     name: str
-    version: str  # the git-SHA tag the model was published under (12 characters)
+    version: str  # the tag the model was published under: a release tag or a 12-character SHA
     region: Region
     max_horizon: int
     trained_to: datetime | None
@@ -83,23 +83,11 @@ class ModelStore:
         if self.state is not ModelState.LOADING:
             return
         try:
-            directory, source = self._locate()
-            model = load_model(directory)
-            metadata: dict[str, Any] = json.loads(
-                (directory / METADATA_FILE).read_text(encoding="utf-8")
-            )
-            trained = metadata.get("trained_on")
-            self.loaded = LoadedModel(
-                model=model,
-                name=model.name,
-                version=str(metadata["version"])[:12],
-                region=Region(metadata.get("region", Region.VIC1.value)),
-                max_horizon=max(model.horizons),
-                trained_to=datetime.fromisoformat(trained[1]) if trained else None,
-                source=source,
-            )
+            self.loaded = fetch_model(self._settings, download=self._download)
             self.state = ModelState.READY
-            log.info("loaded %s %s from %s", self.loaded.name, self.loaded.version, source)
+            log.info(
+                "loaded %s %s from %s", self.loaded.name, self.loaded.version, self.loaded.source
+            )
             for listener in self._listeners:
                 listener(self.loaded)
         except Exception as exc:
@@ -135,15 +123,41 @@ class ModelStore:
         with self._predict_lock:  # one LightGBM prediction at a time on the shared boosters
             return loaded.model.predict(features)
 
-    def _locate(self) -> tuple[Path, str]:
-        settings = self._settings
-        if settings.model_dir is not None:
-            return settings.model_dir, f"local:{settings.model_dir}"
-        assert settings.model_repo_id is not None  # noqa: S101 - guaranteed by LOADING state
-        settings.model_cache_dir.mkdir(parents=True, exist_ok=True)
-        path = self._download(
-            settings.model_repo_id,
-            revision=settings.model_revision,
-            cache_dir=settings.model_cache_dir,
-        )
-        return Path(path), f"hf:{settings.model_repo_id}@{settings.model_revision}"
+
+def fetch_model(settings: Settings, *, download: Downloader = snapshot_download) -> LoadedModel:
+    """Load the configured model: ``MODEL_DIR`` if set, else ``MODEL_REPO_ID`` at its revision.
+
+    Shared by the API and the monitoring and retraining jobs, so all three judge the same model.
+    """
+    directory, source = _locate(settings, download)
+    model = load_model(directory)
+    metadata: dict[str, Any] = json.loads((directory / METADATA_FILE).read_text(encoding="utf-8"))
+    trained = metadata.get("trained_on")
+    return LoadedModel(
+        model=model,
+        name=model.name,
+        version=model_version(metadata),
+        region=Region(metadata.get("region", Region.VIC1.value)),
+        max_horizon=max(model.horizons),
+        trained_to=datetime.fromisoformat(trained[1]) if trained else None,
+        source=source,
+    )
+
+
+def model_version(metadata: dict[str, Any]) -> str:
+    """The version predictions are logged under: the release tag, or the SHA's first 12 chars."""
+    return str(metadata.get("release") or str(metadata["version"])[:12])
+
+
+def _locate(settings: Settings, download: Downloader) -> tuple[Path, str]:
+    if settings.model_dir is not None:
+        return settings.model_dir, f"local:{settings.model_dir}"
+    if settings.model_repo_id is None:
+        raise ValueError("no model configured: set MODEL_REPO_ID (or MODEL_DIR)")
+    settings.model_cache_dir.mkdir(parents=True, exist_ok=True)
+    path = download(
+        settings.model_repo_id,
+        revision=settings.model_revision,
+        cache_dir=settings.model_cache_dir,
+    )
+    return Path(path), f"hf:{settings.model_repo_id}@{settings.model_revision}"

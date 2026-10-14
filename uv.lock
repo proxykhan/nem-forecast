@@ -1621,6 +1621,7 @@ dependencies = [
 [package.optional-dependencies]
 monitor = [
     { name = "evidently" },
+    { name = "scipy" },
 ]
 train = [
     { name = "matplotlib" },
@@ -1658,6 +1659,7 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.7" },
     { name = "pydantic-settings", specifier = ">=2.3" },
     { name = "scikit-learn", marker = "extra == 'train'" },
+    { name = "scipy", marker = "extra == 'monitor'" },
     { name = "sqlalchemy", specifier = ">=2.0" },
     { name = "typer", specifier = ">=0.12" },
     { name = "uvicorn" },

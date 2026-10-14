@@ -23,7 +23,11 @@ def test_help_lists_every_pipeline_command() -> None:
         "backtest",
         "train",
         "serve",
+        "score",
         "monitor",
+        "calibrate-drift",
+        "retrain",
+        "grant-reader",
     ):
         assert command in result.output
 
@@ -35,17 +39,32 @@ def test_version() -> None:
     assert __version__ in result.output
 
 
-@pytest.mark.parametrize(
-    ("command", "phase"),
-    [
-        ("monitor", 6),
-    ],
-)
-def test_stub_commands_are_not_implemented_yet(command: str, phase: int) -> None:
-    result = runner.invoke(app, [command])
+def test_monitoring_commands_need_the_served_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DATABASE_URL", "sqlite://")
+    for command in ("monitor", "retrain"):
+        result = runner.invoke(app, [command])
 
-    assert isinstance(result.exception, NotImplementedError)
-    assert f"Phase {phase}" in str(result.exception)
+        assert result.exit_code == 2
+        assert "MODEL_REPO_ID" in result.output
+
+
+def test_issues_need_a_github_token(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("DATABASE_URL", "sqlite://")
+    monkeypatch.setenv("MODEL_DIR", str(tmp_path))
+    monkeypatch.setattr("nem_forecast.cli._served_model", lambda: None)
+
+    result = runner.invoke(app, ["monitor", "--open-issues"])
+
+    assert result.exit_code == 2
+    assert "GITHUB_TOKEN" in result.output
+
+
+def test_grant_reader_rejects_odd_role_names(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DATABASE_URL", "sqlite://")
+
+    result = runner.invoke(app, ["grant-reader", "--role", "x; DROP TABLE y"])
+
+    assert result.exit_code == 2
 
 
 def test_migrate_applies_then_reports_up_to_date(
