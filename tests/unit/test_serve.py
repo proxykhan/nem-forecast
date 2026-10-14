@@ -156,3 +156,21 @@ def test_serving_and_ingestion_work_without_the_training_extras() -> None:
 
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == "ok"
+
+
+@pytest.mark.parametrize(
+    ("baked", "render", "expected"),
+    [
+        ("abc1234", "fromrender", "abc1234"),  # passed at image build
+        ("", "fromrender", "fromrender"),  # Render builds without the build argument
+        ("unknown", "fromrender", "fromrender"),  # older images baked a placeholder
+    ],
+)
+def test_service_sha_prefers_a_real_baked_sha_then_render(
+    monkeypatch: pytest.MonkeyPatch, baked: str, render: str, expected: str
+) -> None:
+    from nem_forecast.serve.app import service_sha
+
+    monkeypatch.setenv("RENDER_GIT_COMMIT", render)
+
+    assert service_sha(settings(git_sha=baked)) == expected

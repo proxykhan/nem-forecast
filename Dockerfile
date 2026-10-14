@@ -31,7 +31,8 @@ RUN uv sync --frozen --no-dev --no-editable \
 
 
 FROM python:${PYTHON_VERSION}-slim AS runtime
-ARG GIT_SHA=unknown
+# Empty unless passed: on Render the running service reports RENDER_GIT_COMMIT instead.
+ARG GIT_SHA=
 ENV PATH=/opt/venv/bin:$PATH \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \

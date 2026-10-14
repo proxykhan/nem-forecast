@@ -49,7 +49,8 @@ PROBLEM_RESPONSES: dict[int | str, dict[str, Any]] = {
 
 def service_sha(settings: Settings) -> str | None:
     """Commit of the running code: baked in at image build, set by Render, or read from git."""
-    return settings.git_sha or os.getenv("RENDER_GIT_COMMIT") or git_sha()
+    baked = settings.git_sha if settings.git_sha not in (None, "", "unknown") else None
+    return baked or os.getenv("RENDER_GIT_COMMIT") or git_sha()
 
 
 def create_app(
