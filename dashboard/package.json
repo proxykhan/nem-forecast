@@ -8,7 +8,7 @@
     "start": "next start",
     "lint": "eslint",
     "dev:root-env": "node scripts/dev-root-env.mjs",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "next typegen && tsc --noEmit"
   },
   "dependencies": {
     "@neondatabase/serverless": "1.1.0",
