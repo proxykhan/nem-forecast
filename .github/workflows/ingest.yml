@@ -5,9 +5,11 @@ name: Ingest and forecast
 # forecast. The API logs every forecast it serves, and those logged forecasts are what the daily
 # monitor scores against actuals, so this job is also the system's steady source of traffic.
 #
-# The half-hourly runs read the last 2 hours; every 6 hours a run reads 24 hours instead, so a
-# stretch of skipped or failed runs is filled in. The loader is idempotent, so re-reading an
-# interval is free.
+# Half-hourly runs read from the latest interval already loaded (up to 48 hours back), so a run
+# GitHub starts late, or a stretch of runs it skips, is caught up rather than left as a gap; on
+# this repository scheduled runs have started up to 5.6 hours late, and some never. Every 6
+# hours a run re-reads the whole last day for revisions. The loader is idempotent, so reading an
+# interval twice is free.
 #
 # NOTE: GitHub disables scheduled workflows in public repositories after 60 days without
 # repository activity. If ingestion silently stops, re-enable this workflow in the Actions tab
@@ -38,7 +40,10 @@ jobs:
     env:
       ENVIRONMENT: ci
       DATABASE_URL: ${{ secrets.DATABASE_URL }}
-      HOURS: ${{ inputs.hours || (github.event.schedule == '17 */6 * * *' && '24' || '2') }}
+      # Manual: the requested window. 6-hourly: the last day. Half-hourly: since the latest data.
+      INGEST_ARGS: >-
+        ${{ inputs.hours && format('--hours {0}', inputs.hours)
+        || (github.event.schedule == '17 */6 * * *' && '--hours 24' || '--since-latest --hours 48') }}
       SERVICE_URL: ${{ vars.RENDER_SERVICE_URL }}
     steps:
       - uses: actions/checkout@v7
@@ -61,7 +66,9 @@ jobs:
         run: uv run nem-forecast migrate
 
       - name: Ingest
-        run: uv run nem-forecast ingest --hours "$HOURS" --region VIC1
+        run: |
+          # shellcheck disable=SC2086 # INGEST_ARGS is a list of flags
+          uv run nem-forecast ingest $INGEST_ARGS --region VIC1
 
       - name: Request the latest forecast
         if: env.SERVICE_URL != ''

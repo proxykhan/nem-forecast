@@ -191,7 +191,9 @@ function DriftHeadline({ data }: { data: Dashboard }) {
 function DriftTable({ data }: { data: Dashboard }) {
   const monitor = data.monitor!;
   const rows: { name: string; kind: string; score?: number; threshold?: number; verdict: string; tone: Tone }[] =
-    Object.entries(monitor.dataDrift.columns).map(([name, c]) => ({
+    Object.entries(monitor.dataDrift.columns)
+      .sort(([a], [b]) => featureOrder(a) - featureOrder(b))
+      .map(([name, c]) => ({
       name,
       kind: "feature",
       score: c.score,
@@ -239,6 +241,19 @@ function DriftTable({ data }: { data: Dashboard }) {
     </div>
   );
 }
+
+// The model's feature order; JSONB does not keep the order the monitor wrote them in.
+const FEATURES = [
+  "demand_at_origin",
+  "same_slot_prev_day",
+  "same_slot_prev_week",
+  "same_slot_mean_4w",
+  "rolling_mean_24h",
+  "rolling_std_24h",
+  "rolling_mean_7d",
+];
+const featureOrder = (name: string) =>
+  FEATURES.includes(name) ? FEATURES.indexOf(name) : FEATURES.length;
 
 type Tone = "ok" | "bad" | "warn";
 const TONE: Record<Tone, string> = {

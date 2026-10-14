@@ -298,6 +298,30 @@ class TestCommands:
         assert result.exit_code == 0, result.output
         assert "1 files (0 failed)" in result.output
 
+    def test_ingest_since_latest_reads_only_what_is_new(
+        self, run_cli: Callable[..., Any], aemo: FakeAemo
+    ) -> None:
+        for minutes in (-120, 0, 5, 10):  # 02:40, then 04:40 .. 04:50 market time
+            aemo.add_dispatch_is(*shifted_dispatch_is(minutes))
+        first = run_cli("ingest", "--start", "2026-10-13 04:35", "--end", "2026-10-13 04:40")
+        assert first.exit_code == 0, first.output
+
+        result = run_cli("ingest", "--since-latest", "--end", "2026-10-13 04:50")
+
+        assert result.exit_code == 0, result.output
+        assert "Reading from 2026-10-13 04:10" in result.output  # 04:40 less half an hour
+        assert "3 files (0 failed), 3 records: 2 inserted, 0 revised, 1 unchanged" in result.output
+
+    def test_ingest_since_latest_never_reads_further_back_than_hours(
+        self, run_cli: Callable[..., Any], aemo: FakeAemo
+    ) -> None:
+        aemo.add_dispatch_is(*shifted_dispatch_is(-120))
+        run_cli("ingest", "--start", "2026-10-13 02:35", "--end", "2026-10-13 02:40")
+
+        result = run_cli("ingest", "--since-latest", "--end", "2026-10-13 04:50", "--hours", "1")
+
+        assert "Reading from 2026-10-13 03:50" in result.output
+
     def test_ingest_exits_non_zero_when_nothing_was_found(
         self, run_cli: Callable[..., Any]
     ) -> None:

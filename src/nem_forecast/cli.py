@@ -150,6 +150,13 @@ def ingest(
     hours: Annotated[
         int, typer.Option(min=1, max=72, help="Window length when --start is not given.")
     ] = 24,
+    since_latest: Annotated[
+        bool,
+        typer.Option(
+            help="Start half an hour before the latest interval already loaded, but no more "
+            "than --hours back: a late scheduled run catches up instead of leaving a gap."
+        ),
+    ] = False,
     region: Annotated[
         list[Region] | None, typer.Option(help="Region to keep; repeat for several. Default: VIC1.")
     ] = None,
@@ -161,6 +168,12 @@ def ingest(
     regions = region or [Region.VIC1]
 
     with _database() as engine, NemwebClient(cache_dir=cache_dir) as client:
+        if since_latest and start is None:
+            latest = [coverage(engine, each)[2] for each in regions]
+            loaded = [ts for ts in latest if ts is not None]
+            if len(loaded) == len(regions):  # a region with no data reads the full --hours
+                start_at = max(start_at, min(loaded) - timedelta(minutes=30))
+            typer.echo(f"Reading from {start_at.astimezone(NEM_TZ):%Y-%m-%d %H:%M} (market time)")
         report = ingest_dispatch_is(engine, client, start=start_at, end=end_at, regions=regions)
         typer.echo(
             f"{report.files} files ({report.files_failed} failed), {report.records} records: "
