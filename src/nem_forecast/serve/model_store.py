@@ -1,9 +1,12 @@
 """The forecasting model: downloaded once at startup, cached on disk, never fetched per request.
 
-Loading runs in a background thread so the process answers liveness checks immediately; until
-it finishes (or if it fails) the service reports itself not ready and refuses to forecast with a
-503 problem. A download from Hugging Face Hub lands in ``MODEL_CACHE_DIR``; a restarted process
-with a warm cache skips the transfer.
+Loading runs in a background thread so the process answers liveness checks as soon as it can;
+until it finishes the service reports itself not ready. A forecast request that arrives while the
+model is loading waits for it (up to ``MODEL_WAIT_SECONDS``): on a free-tier cold start the
+request that woke the service should get a forecast, not an error.
+
+A download from Hugging Face Hub lands in ``MODEL_CACHE_DIR``; a restarted process with a warm
+cache skips the transfer.
 """
 
 from __future__ import annotations
@@ -60,11 +63,14 @@ class ModelStore:
         self._settings = settings
         self._download = download
         self._listeners: list[Callable[[LoadedModel], None]] = []
+        self._finished = threading.Event()
         self._predict_lock = threading.Lock()
         self.loaded: LoadedModel | None = None
         self.error: str | None = None
         configured = settings.model_dir is not None or settings.model_repo_id is not None
         self.state = ModelState.LOADING if configured else ModelState.NOT_CONFIGURED
+        if not configured:
+            self._finished.set()
 
     def on_loaded(self, listener: Callable[[LoadedModel], None]) -> None:
         """Call ``listener`` with the model once loaded (immediately if it already is)."""
@@ -100,8 +106,13 @@ class ModelStore:
             self.error = f"{type(exc).__name__}: {exc}"
             self.state = ModelState.FAILED
             log.exception("model failed to load")
+        finally:
+            self._finished.set()
 
-    def require(self) -> LoadedModel:
+    def require(self, wait: float = 0.0) -> LoadedModel:
+        """The loaded model, waiting up to ``wait`` seconds for one that is still loading."""
+        if self.loaded is None and wait > 0:
+            self._finished.wait(wait)
         if self.loaded is not None:
             return self.loaded
         if self.state is ModelState.LOADING:

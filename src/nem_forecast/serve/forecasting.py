@@ -71,17 +71,25 @@ def utc_now() -> datetime:
 
 
 class ForecastService:
-    def __init__(self, engine: Engine, models: ModelStore, *, clock: Clock = utc_now) -> None:
+    def __init__(
+        self,
+        engine: Engine,
+        models: ModelStore,
+        *,
+        clock: Clock = utc_now,
+        model_wait_seconds: float = 0.0,
+    ) -> None:
         self._engine = engine
         self._models = models
         self._clock = clock
+        self._model_wait = model_wait_seconds
         self._latest: dict[Region, CachedForecast] = {}
         self._latest_lock = threading.Lock()
 
     # -- public ----------------------------------------------------------------------------------
 
     def forecast(self, request: ForecastRequest) -> ForecastResponse:
-        loaded = self._models.require()
+        loaded = self._models.require(wait=self._model_wait)
         origin = request.forecast_origin.astimezone(UTC)
         self._validate(request.region, origin, request.horizon, loaded)
         series = self._history(request.region, end=origin)
@@ -99,7 +107,7 @@ class ForecastService:
 
     def latest(self, region: Region = Region.VIC1) -> LatestForecast:
         """The forecast from the latest ingested half-hour, recomputed (and logged) every 5 min."""
-        loaded = self._models.require()
+        loaded = self._models.require(wait=self._model_wait)
         self._validate_region(region, loaded)
         now = self._clock()
         with self._latest_lock:

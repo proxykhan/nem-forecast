@@ -6,6 +6,7 @@ for "now", so origin rules (not in the future, at most 7 days old) are tested de
 
 from __future__ import annotations
 
+import time
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -167,7 +168,9 @@ async def test_forecasts_wait_for_a_model_that_is_still_loading(
 ) -> None:
     store = ModelStore(make_settings(database, model_dir=model_dir))
     store.load = lambda: None  # type: ignore[method-assign]  # never finishes loading
-    app = create_app(make_settings(database), engine=database, models=store, clock=clock)
+    app = create_app(
+        make_settings(database, model_wait_seconds=0.2), engine=database, models=store, clock=clock
+    )
     async with (
         LifespanManager(app),
         httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://api") as http,
@@ -402,3 +405,27 @@ async def test_history_windows_start_on_a_half_hour_boundary(
 
     assert response.status_code == 200
     assert "incomplete" not in caplog.text
+
+
+async def test_a_request_during_a_cold_start_waits_for_the_model(
+    database: Engine, model_dir: Path, clock: Clock
+) -> None:
+    """The request that wakes a free-tier instance should get a forecast, not a 503."""
+    store = ModelStore(make_settings(database, model_dir=model_dir))
+    real_load = store.load
+
+    def slow_load() -> None:
+        time.sleep(0.5)
+        real_load()
+
+    store.load = slow_load  # type: ignore[method-assign]
+    app = create_app(make_settings(database), engine=database, models=store, clock=clock)
+    async with (
+        LifespanManager(app),
+        httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://api") as http,
+    ):
+        response = await http.post(
+            "/forecast", json={"forecast_origin": market(DATA_END), "horizon": 2}
+        )
+
+    assert response.status_code == 200, response.text

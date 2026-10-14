@@ -37,7 +37,12 @@ ENV PATH=/opt/venv/bin:$PATH \
     PYTHONUNBUFFERED=1 \
     GIT_SHA=${GIT_SHA} \
     MODEL_CACHE_DIR=/home/app/.cache/models \
-    PORT=8000
+    PORT=8000 \
+    OMP_NUM_THREADS=1 \
+    POLARS_MAX_THREADS=1 \
+    OPENBLAS_NUM_THREADS=1
+# One thread per pool: on Render's 0.1-CPU free tier, thread pools sized to the host's cores
+# only contend for the quota (measured: ready in 57 s instead of 105 s at 0.1 CPU).
 # LightGBM needs the OpenMP runtime, which the slim base does not ship.
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends libgomp1 \

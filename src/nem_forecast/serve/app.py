@@ -64,7 +64,9 @@ def create_app(
     metrics = Metrics()
     models = models or ModelStore(settings)
     models.on_loaded(metrics.model_loaded)
-    service = ForecastService(engine, models, clock=clock)
+    service = ForecastService(
+        engine, models, clock=clock, model_wait_seconds=settings.model_wait_seconds
+    )
     code_sha = service_sha(settings)
 
     @asynccontextmanager

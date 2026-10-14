@@ -50,6 +50,7 @@ class Settings(BaseSettings):
     model_revision: str = "main"  # pin to a git-SHA tag in production
     model_dir: Path | None = None  # a local saved model instead of the Hub (development, tests)
     model_cache_dir: Path = Path(".cache/models")
+    model_wait_seconds: float = 90.0  # how long a request waits for a model still loading
     git_sha: str | None = None  # commit of the running service, set at image build
 
     @field_validator("database_url", mode="before")

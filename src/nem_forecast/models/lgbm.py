@@ -23,9 +23,10 @@ DEFAULT_PARAMS: dict[str, Any] = {
     "lambda_l2": 1.0,
     "num_boost_round": 400,
 }
-# Half the logical cores, capped at 8: on Windows, OpenMP across every hyperthread is 2-3x
-# slower than this for the small per-group datasets (measured: 16 s vs 6 s per full fit).
-_THREADS = max(1, min(8, (os.cpu_count() or 2) // 2))
+# OMP_NUM_THREADS if set (the serving image sets 1: on a 0.1-CPU host extra threads only fight
+# over the quota), else half the logical cores, capped at 8: on Windows, OpenMP across every
+# hyperthread is 2-3x slower for the small per-group datasets (measured: 16 s vs 6 s per fit).
+_THREADS = int(os.getenv("OMP_NUM_THREADS") or max(1, min(8, (os.cpu_count() or 2) // 2)))
 _FIXED = {"verbosity": -1, "seed": 42, "force_row_wise": True, "num_threads": _THREADS}
 QUANTILES = (0.1, 0.5, 0.9)
 
@@ -77,7 +78,8 @@ class LightGBMDirect(_LightGBMModel):
         self._boosters[f"group_{group}"] = train_booster(rows, self.params, "regression")
 
     def _predict_group(self, group: int, rows: pl.DataFrame) -> np.ndarray:
-        return np.asarray(self._boosters[f"group_{group}"].predict(feature_matrix(rows)), float)
+        booster = self._boosters[f"group_{group}"]
+        return np.asarray(booster.predict(feature_matrix(rows), num_threads=_THREADS), float)
 
 
 class LightGBMQuantile(_LightGBMModel):
@@ -92,7 +94,10 @@ class LightGBMQuantile(_LightGBMModel):
     def _predict_group(self, group: int, rows: pl.DataFrame) -> np.ndarray:
         x = feature_matrix(rows)
         stacked = np.column_stack(
-            [np.asarray(self._boosters[_key(group, q)].predict(x), float) for q in QUANTILES]
+            [
+                np.asarray(self._boosters[_key(group, q)].predict(x, num_threads=_THREADS), float)
+                for q in QUANTILES
+            ]
         )
         # Separately trained quantile models can cross; sorting restores p10 <= p50 <= p90.
         return np.sort(stacked, axis=1)

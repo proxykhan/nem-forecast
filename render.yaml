@@ -1,0 +1,28 @@
+# Render Blueprint for the forecast API (free tier). Create it from the Render dashboard with
+# New > Blueprint, pointing at this repository. Secrets are never stored here: DATABASE_URL is
+# marked sync: false, so Render asks for it once when the Blueprint is created.
+#
+# Deploys are triggered by .github/workflows/cd.yml through the service's deploy hook, only
+# after the tests and a Docker smoke test pass, so automatic deploys on push are off.
+services:
+  - type: web
+    name: nem-forecast-api
+    runtime: docker
+    plan: free
+    # Closest Render region to the Neon database in Sydney (AWS ap-southeast-2).
+    region: singapore
+    branch: main
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /health
+    autoDeployTrigger: "off"
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+      - key: ENVIRONMENT
+        value: production
+      # The served model: pinned to the git-SHA tag it was published under on Hugging Face.
+      - key: MODEL_REPO_ID
+        value: Azharkhan79/nem-forecast-vic1
+      - key: MODEL_REVISION
+        value: fa90c4b4c9a3
