@@ -1,9 +1,13 @@
-name: Ingest
+name: Ingest and forecast
 
-# Pulls the last 24 hours of 5-minute dispatch data from NEMWeb into Neon every 6 hours. The
-# overlapping windows are deliberate: the loader is idempotent, so re-reading an interval is
-# free, and a single missed run loses nothing. Data goes to the database; this workflow never
-# commits to the repository.
+# Every half-hour: pull the latest 5-minute dispatch data from NEMWeb into Neon, then ask the live
+# API for a forecast from the newest complete half-hour, the way a trading desk polls its
+# forecast. The API logs every forecast it serves, and those logged forecasts are what the daily
+# monitor scores against actuals, so this job is also the system's steady source of traffic.
+#
+# The half-hourly runs read the last 2 hours; every 6 hours a run reads 24 hours instead, so a
+# stretch of skipped or failed runs is filled in. The loader is idempotent, so re-reading an
+# interval is free.
 #
 # NOTE: GitHub disables scheduled workflows in public repositories after 60 days without
 # repository activity. If ingestion silently stops, re-enable this workflow in the Actions tab
@@ -11,7 +15,8 @@ name: Ingest
 
 on:
   schedule:
-    - cron: "17 */6 * * *" # minute 17: off the top of the hour, when Actions queues are busiest
+    - cron: "4,34 * * * *" # just after each half-hour's last 5-minute interval is published
+    - cron: "17 */6 * * *" # the 24-hour catch-up read
   workflow_dispatch:
     inputs:
       hours:
@@ -29,11 +34,12 @@ concurrency:
 jobs:
   ingest:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 20
     env:
       ENVIRONMENT: ci
       DATABASE_URL: ${{ secrets.DATABASE_URL }}
-      HOURS: ${{ inputs.hours || '24' }}
+      HOURS: ${{ inputs.hours || (github.event.schedule == '17 */6 * * *' && '24' || '2') }}
+      SERVICE_URL: ${{ vars.RENDER_SERVICE_URL }}
     steps:
       - uses: actions/checkout@v7
 
@@ -56,3 +62,12 @@ jobs:
 
       - name: Ingest
         run: uv run nem-forecast ingest --hours "$HOURS" --region VIC1
+
+      - name: Request the latest forecast
+        if: env.SERVICE_URL != ''
+        # A free Render instance may be asleep; the first request wakes it and waits for the model.
+        run: |
+          curl -fsS --max-time 150 --retry 3 --retry-delay 20 --retry-all-errors \
+            "$SERVICE_URL/forecast/latest" -o latest.json
+          echo "Forecast from $(jq -r .forecast_origin latest.json), model $(jq -r .model_version latest.json), $(jq '.points | length' latest.json) half-hours" \
+            | tee -a "$GITHUB_STEP_SUMMARY"

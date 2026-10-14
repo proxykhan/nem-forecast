@@ -99,7 +99,7 @@ flowchart LR
         monthly["Monthly price and<br/>demand files"]
     end
     subgraph actions["GitHub Actions"]
-        ingest["Ingest<br/>every 6 hours"]
+        ingest["Ingest and forecast<br/>every half-hour"]
         nightly["Nightly backtest"]
         cd["CI and CD<br/>tests, image smoke test"]
         keepalive["Keep-alive<br/>business hours"]
@@ -121,6 +121,7 @@ flowchart LR
     api -- "every forecast, before it is returned" --> db
     users --> api
     keepalive -. "/health" .-> api
+    ingest -- "GET /forecast/latest" --> api
 ```
 
 | Service | Role | Free tier |
@@ -208,7 +209,7 @@ Two AEMO feeds, both public and keyless:
 
 | Feed | Used for | Format |
 |---|---|---|
-| NEMWeb `Reports/Current/DispatchIS_Reports` | Scheduled ingest every 6 hours (last 24 h) | One zipped MMS report per 5-minute interval; about 48 hours retained |
+| NEMWeb `Reports/Current/DispatchIS_Reports` | Scheduled ingest every half-hour (last 2 h; 24 h every 6 hours) | One zipped MMS report per 5-minute interval; about 48 hours retained |
 | aemo.com.au monthly `PRICE_AND_DEMAND_<yyyymm>_<region>.csv` | Backfill, and repairing gaps | Plain CSV, one file per region per month, updated daily |
 
 What the real files showed, and what the code does about it:
@@ -357,7 +358,7 @@ above are the answers.
 |---|---|---|
 | [CI](.github/workflows/ci.yml) | Pull requests; called by CD | Ruff, mypy (strict), tests on Python 3.12 and 3.13 against a Postgres service (80% coverage gate), `pip-audit` on every locked dependency, `gitleaks` over the whole history |
 | [CD](.github/workflows/cd.yml) | Every push to `main` | CI, then build the image and smoke-test `/health`, `/ready` and `/metrics` against Postgres and the real model, then trigger Render's deploy hook for that exact commit, then wait until the live service reports the commit and serves a forecast; publishes the coverage badge |
-| [Ingest](.github/workflows/ingest.yml) | Every 6 hours | Last 24 hours of 5-minute data into Neon (core install only) |
+| [Ingest and forecast](.github/workflows/ingest.yml) | Every half-hour | Latest 5-minute data into Neon (24 hours back every 6 hours, to fill gaps), then requests `/forecast/latest` like a client would, so the live service logs a forecast from every half-hour for monitoring to score |
 | [Nightly backtest](.github/workflows/backtest.yml) | 02:37 Melbourne | Full backtest on the latest data, logged to MLflow, recorded and pruned to 30 days in Neon; commits the refreshed report and the results tables above |
 | [Keep-alive](.github/workflows/keepalive.yml) | Every 10 min, Mon-Fri 08:00-18:00 Melbourne | Pings `/health` so the free instance stays warm when people use it (about 220 of 750 free hours a month) |
 

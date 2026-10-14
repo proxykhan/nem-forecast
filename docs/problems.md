@@ -47,7 +47,7 @@ forecasts nobody has evaluated.
 ### origin-not-ingested
 
 The origin is valid, but demand for the half-hour ending at it has not been ingested yet (the
-scheduled ingest runs every 6 hours). `latest_available` gives the latest complete half-hour;
+scheduled ingest runs every half-hour). `latest_available` gives the latest complete half-hour;
 forecast from that, or use `GET /forecast/latest`.
 
 ## Service problems (503)
