@@ -12,25 +12,34 @@ classifiers = [
     "Programming Language :: Python :: 3.13",
     "Typing :: Typed",
 ]
+# Core: what ingestion and the forecast service need. The serving image installs only this.
 dependencies = [
-    "evidently",
     "fastapi",
     "holidays>=0.106",
     "httpx",
     "huggingface-hub>=2.2.0",
     "lightgbm",
+    "polars",
+    "prometheus-client",
+    "psycopg[binary]>=3.2",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.3",
+    "sqlalchemy>=2.0",
+    "typer>=0.12",
+    "uvicorn",
+]
+
+# Heavy tools for training, tracking and monitoring, kept out of the serving image.
+[project.optional-dependencies]
+train = [
     "matplotlib>=3.11.2",
     "mlflow",
     "optuna>=5.0.0",
     "pandas",
-    "polars",
-    "psycopg[binary]>=3.2",
-    "pydantic>=2.7",
-    "pydantic-settings>=2.3",
     "scikit-learn",
-    "sqlalchemy>=2.0",
-    "typer>=0.12",
-    "uvicorn",
+]
+monitor = [
+    "evidently",
 ]
 
 [project.scripts]
@@ -38,6 +47,7 @@ nem-forecast = "nem_forecast.cli:app"
 
 [dependency-groups]
 dev = [
+    "asgi-lifespan",
     "mypy",
     "pytest",
     "pytest-cov",

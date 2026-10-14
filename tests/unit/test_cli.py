@@ -38,7 +38,6 @@ def test_version() -> None:
 @pytest.mark.parametrize(
     ("command", "phase"),
     [
-        ("serve", 4),
         ("monitor", 6),
     ],
 )
@@ -65,3 +64,13 @@ def test_migrate_applies_then_reports_up_to_date(
     assert "Applied 001_widgets.sql" in first.output
     assert second.exit_code == 0, second.output
     assert "Database is up to date." in second.output
+
+
+def test_serve_starts_the_api_on_the_requested_port(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr("nem_forecast.serve.__main__.run", lambda **kwargs: calls.append(kwargs))
+
+    result = runner.invoke(app, ["serve", "--port", "9000"])
+
+    assert result.exit_code == 0, result.output
+    assert calls == [{"host": "0.0.0.0", "port": 9000}]  # noqa: S104 - container interface

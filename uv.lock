@@ -147,6 +147,18 @@ wheels = [
 ]
 
 [[package]]
+name = "asgi-lifespan"
+version = "2.1.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "sniffio" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/6a/da/e7908b54e0f8043725a990bf625f2041ecf6bfe8eb7b19407f1c00b630f7/asgi-lifespan-2.1.0.tar.gz", hash = "sha256:5e2effaf0bfe39829cf2d64e7ecc47c7d86d676a6599f7afba378c31f5e3a308", size = 15627, upload-time = "2023-03-28T17:35:49.126Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/2f/f5/c36551e93acba41a59939ae6a0fb77ddb3f2e8e8caa716410c65f7341f72/asgi_lifespan-2.1.0-py3-none-any.whl", hash = "sha256:ed840706680e28428c01e14afb3875d7d76d3206f3d5b2f2294e059b5c23804f", size = 10895, upload-time = "2023-03-28T17:35:47.772Z" },
+]
+
+[[package]]
 name = "ast-serialize"
 version = "0.13.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1591,28 +1603,36 @@ name = "nem-forecast"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
-    { name = "evidently" },
     { name = "fastapi" },
     { name = "holidays" },
     { name = "httpx" },
     { name = "huggingface-hub" },
     { name = "lightgbm" },
-    { name = "matplotlib" },
-    { name = "mlflow" },
-    { name = "optuna" },
-    { name = "pandas" },
     { name = "polars" },
+    { name = "prometheus-client" },
     { name = "psycopg", extra = ["binary"] },
     { name = "pydantic" },
     { name = "pydantic-settings" },
-    { name = "scikit-learn" },
     { name = "sqlalchemy" },
     { name = "typer" },
     { name = "uvicorn" },
 ]
 
+[package.optional-dependencies]
+monitor = [
+    { name = "evidently" },
+]
+train = [
+    { name = "matplotlib" },
+    { name = "mlflow" },
+    { name = "optuna" },
+    { name = "pandas" },
+    { name = "scikit-learn" },
+]
+
 [package.dev-dependencies]
 dev = [
+    { name = "asgi-lifespan" },
     { name = "mypy" },
     { name = "pytest" },
     { name = "pytest-cov" },
@@ -1622,28 +1642,31 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "evidently" },
+    { name = "evidently", marker = "extra == 'monitor'" },
     { name = "fastapi" },
     { name = "holidays", specifier = ">=0.106" },
     { name = "httpx" },
     { name = "huggingface-hub", specifier = ">=2.2.0" },
     { name = "lightgbm" },
-    { name = "matplotlib", specifier = ">=3.11.2" },
-    { name = "mlflow" },
-    { name = "optuna", specifier = ">=5.0.0" },
-    { name = "pandas" },
+    { name = "matplotlib", marker = "extra == 'train'", specifier = ">=3.11.2" },
+    { name = "mlflow", marker = "extra == 'train'" },
+    { name = "optuna", marker = "extra == 'train'", specifier = ">=5.0.0" },
+    { name = "pandas", marker = "extra == 'train'" },
     { name = "polars" },
+    { name = "prometheus-client" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.2" },
     { name = "pydantic", specifier = ">=2.7" },
     { name = "pydantic-settings", specifier = ">=2.3" },
-    { name = "scikit-learn" },
+    { name = "scikit-learn", marker = "extra == 'train'" },
     { name = "sqlalchemy", specifier = ">=2.0" },
     { name = "typer", specifier = ">=0.12" },
     { name = "uvicorn" },
 ]
+provides-extras = ["train", "monitor"]
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "asgi-lifespan" },
     { name = "mypy" },
     { name = "pytest" },
     { name = "pytest-cov" },
@@ -1943,6 +1966,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/81/74/ba08d81e668ccfe8658d7520a307e63c19862c08eb4ccb26f356c5239a7a/prettytable-3.18.0.tar.gz", hash = "sha256:439217116152244369caf3d9f1caf2f9fe29b03bd79e88d2928c8e718c95d680", size = 76373, upload-time = "2026-06-22T16:07:50.174Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/fe/be/2e6798ace5cc036f5d05d36b7b2fd85346f1a708c87060890b070d0ec607/prettytable-3.18.0-py3-none-any.whl", hash = "sha256:b3346e0e6f79180833aebaac088ae926340586cf6d7d991b9eb125b65f72313a", size = 37357, upload-time = "2026-06-22T16:07:48.595Z" },
+]
+
+[[package]]
+name = "prometheus-client"
+version = "0.26.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/52/73/f1334c29c2af4cd9dba6c7817e61b611bd0215e2eb5565c6064a4de18802/prometheus_client-0.26.0.tar.gz", hash = "sha256:04a91bcf94e2cf74a44a1a874d651a2e853ed354b6e822f3b7487751465d5c2b", size = 92910, upload-time = "2026-07-24T19:36:41.893Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/eb/a3/b69efbf4143b5b9859b977770bbbabcc2796b702fa69dc40271e45cd5a56/prometheus_client-0.26.0-py3-none-any.whl", hash = "sha256:fa93d06737aa02bacd05794768508bb97d2fbee28cb3bca04eaae92f0ca953d6", size = 64494, upload-time = "2026-07-24T19:36:40.854Z" },
 ]
 
 [[package]]

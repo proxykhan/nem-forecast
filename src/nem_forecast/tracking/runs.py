@@ -22,7 +22,7 @@ import mlflow
 import polars as pl
 
 from nem_forecast.backtest.baselines import Forecaster
-from nem_forecast.backtest.harness import BacktestConfig, Fold
+from nem_forecast.backtest.harness import BacktestConfig, Fold, forecaster_params
 from nem_forecast.backtest.metrics import ALL_BUCKETS, ALL_HORIZONS, score
 from nem_forecast.features.build import FEATURE_VERSION, FEATURES
 from nem_forecast.models.tuning import TuningResult, ValidationSplit
@@ -51,19 +51,7 @@ def flatten_metrics(predictions: pl.DataFrame) -> dict[str, float]:
     return flat
 
 
-def model_params(forecaster: Forecaster) -> dict[str, Any]:
-    params: dict[str, Any] = {
-        "model": forecaster.name,
-        "model_kind": getattr(forecaster, "kind", "model"),
-        "description": getattr(forecaster, "description", ""),
-    }
-    if rule := getattr(forecaster, "point", None):
-        params["rule_feature"] = rule
-    for key, value in (getattr(forecaster, "params", None) or {}).items():
-        params[f"lgbm.{key}"] = value
-    if groups := getattr(forecaster, "horizon_groups", None):
-        params["horizon_groups"] = "|".join(f"{g[0]}-{g[-1]}" for g in groups)
-    return params
+model_params = forecaster_params
 
 
 class MlflowBacktestObserver:

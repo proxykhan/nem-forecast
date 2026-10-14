@@ -12,7 +12,6 @@ from typing import Any
 
 import numpy as np
 import polars as pl
-from sklearn.linear_model import Ridge
 
 from nem_forecast.features.build import LABEL
 from nem_forecast.models.base import HORIZON_GROUPS, DirectModel
@@ -62,6 +61,8 @@ class RidgeForecaster(DirectModel):
             "means": filled.mean(axis=0).tolist(),
             "stds": np.where(stds > 0, stds, 1.0).tolist(),
         }
+        from sklearn.linear_model import Ridge  # training only; prediction is plain numpy
+
         fitted = Ridge(alpha=ALPHA).fit(_design(rows, scaling), rows[LABEL].to_numpy())
         self._groups[group] = scaling | {
             "coef": fitted.coef_.tolist(),

@@ -9,6 +9,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta, timezone
 from enum import StrEnum
 from typing import Self
+from uuid import UUID
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -93,6 +94,7 @@ class ForecastResponse(_Domain):
     region: Region
     forecast_origin: AwareDatetime
     model_version: str = Field(min_length=1)
+    request_id: UUID | None = Field(default=None, description="Key of the logged predictions")
     lower_quantile: float = Field(default=0.1, gt=0, lt=0.5)
     upper_quantile: float = Field(default=0.9, gt=0.5, lt=1)
     generated_at: AwareDatetime = Field(default_factory=_utc_now)

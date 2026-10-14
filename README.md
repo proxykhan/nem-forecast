@@ -16,7 +16,7 @@ API that logs every forecast, and monitoring that scores those forecasts against
 | 1 | Ingestion: NEMWeb client, record-type parser, idempotent upsert with revision history, backfill | ✅ Done |
 | 2 | Features and backtesting: leakage-safe features, baselines, walk-forward harness | ✅ Done |
 | 3 | Models and tracking: Ridge, LightGBM, quantile LightGBM, Optuna, DagsHub MLflow, HF Hub registry | ✅ Done |
-| 4 | Serving: FastAPI, prediction logging, Docker | ⬜ Not started |
+| 4 | Serving: FastAPI, prediction logging, Docker | ✅ Done |
 | 5 | Deployment and CI/CD: Render, hardened CI, nightly backtest | ⬜ Not started |
 | 6 | Monitoring and retraining: realised-error scoring, Evidently drift, gated retraining, dashboard | ⬜ Not started |
 
@@ -221,6 +221,82 @@ uv run nem-forecast backtest                                     # baselines + m
 uv run nem-forecast train --model lightgbm_quantile --promote    # train on all data, publish
 ```
 
+## Serving
+
+A FastAPI service loads the published model from Hugging Face once at startup and serves
+forecasts computed from the live database with the same feature code and leakage check as
+training.
+
+| Endpoint | What it does |
+|---|---|
+| `GET /health` | Liveness: always 200 while the process runs; reports the model version and the code's git SHA |
+| `GET /ready` | Readiness: 200 only when the database answers and the model is loaded, else 503 with the reason |
+| `POST /forecast` | `{"region", "forecast_origin", "horizon"}`: a median and 10th/90th percentile forecast for each half-hour |
+| `GET /forecast/latest` | The forecast from the latest ingested half-hour, cached for 5 minutes |
+| `GET /metrics` | Prometheus: request counts, a latency histogram, the loaded model version, forecasts and rows logged |
+
+```bash
+curl -s -X POST localhost:8000/forecast -H 'content-type: application/json' \
+  -d '{"region": "VIC1", "forecast_origin": "2026-10-14T14:30:00+10:00", "horizon": 4}'
+```
+
+```json
+{
+  "region": "VIC1",
+  "forecast_origin": "2026-10-14T14:30:00+10:00",
+  "model_version": "fa90c4b4c9a3",
+  "request_id": "78ffefd3-e34a-46f7-9100-c2e81724a090",
+  "lower_quantile": 0.1,
+  "upper_quantile": 0.9,
+  "points": [
+    {"target_period": "2026-10-14T15:00:00+10:00", "horizon": 1, "predicted_mw": 4973.34, "lower_mw": 4903.24, "upper_mw": 4996.41}
+  ]
+}
+```
+
+- **Every served forecast is logged first.** Each response is written to `predictions` (one row
+  per half-hour, keyed by `request_id`, with the model version) before it is returned; if that
+  write fails, the client gets a 503 instead of numbers that monitoring could never score. A
+  cached `/forecast/latest` returns the forecast already logged, so nothing is counted twice.
+- **Validation follows the model, not just the schema.** Origins must be on the half-hour, not in
+  the future and at most 7 days old; horizons may not exceed 96 by schema, and are also refused
+  beyond what the served model was backtested for (48), with the limit in the response. Errors
+  are [RFC 9457 problem details](docs/problems.md).
+- **Model loading never happens per request.** The model is downloaded once in a background
+  thread at startup and cached on disk; until it is loaded the service is alive but not ready,
+  and forecast requests get a 503 with `Retry-After`.
+- **History is averaged in Postgres.** The 29 days of history a forecast needs arrive as 1,400
+  half-hours instead of 8,400 five-minute rows; a test holds this to exactly the result of the
+  in-memory code used in training.
+
+**Docker image** ([Dockerfile](Dockerfile)): multi-stage, `python:3.12-slim`, non-root user,
+core dependencies only. Training, tracking and monitoring tools (MLflow, Optuna, matplotlib,
+scikit-learn, Evidently) are optional extras that the serving image never installs, and a test
+proves the API and the ingest CLI import without them.
+
+| | Measured |
+|---|--:|
+| Image, compressed (registry transfer) | 183 MB |
+| Image, uncompressed on disk | 546 MB |
+| Cold start to liveness (`/health` 200) | 1.9 s |
+| Cold start to ready (model downloaded from Hugging Face, database checked) | 10.0 s |
+
+The uncompressed image misses the 400 MB target. Polars' runtime (136 MB after stripping debug
+symbols, which saved 51 MB), scipy (99 MB, required by LightGBM) and numpy (49 MB) on a 124 MB
+base already exceed it. The serving path deliberately runs the same polars feature code as
+training, because a second implementation for serving invites training/serving skew, so the
+remaining lever would be pruning scipy's internals: fragile, and still about 450 MB. The
+compressed transfer size and the cold start, which is what the 400 MB limit protects on Render's
+free tier, are both well inside their targets.
+
+```bash
+docker build --build-arg GIT_SHA=$(git rev-parse HEAD) -t nem-forecast-api .
+docker run -p 8000:8000 -e DATABASE_URL=... \
+  -e MODEL_REPO_ID=Azharkhan79/nem-forecast-vic1 -e MODEL_REVISION=fa90c4b4c9a3 nem-forecast-api
+```
+
+Locally without Docker: `uv run nem-forecast serve` (set `MODEL_DIR` to use a model on disk).
+
 ## Database
 
 Schema changes are plain numbered SQL files in [`migrations/`](migrations/), applied in order by
@@ -246,7 +322,7 @@ Requires [uv](https://docs.astral.sh/uv/). uv installs Python 3.12 itself if nee
 
 ```bash
 git clone https://github.com/proxykhan/nem-forecast.git && cd nem-forecast
-uv sync --all-groups
+uv sync --all-extras --all-groups
 cp .env.example .env        # then fill in real values
 uv run nem-forecast migrate
 uv run pytest --cov
@@ -260,12 +336,20 @@ this repository.
 
 | Variable | Required | Used for |
 |---|---|---|
-| `DATABASE_URL` | yes | Neon Postgres |
-| `ENVIRONMENT` | no (`local`) | `local`, `ci` or `production`; production requires every credential below |
-| `MLFLOW_TRACKING_URI` | production | DagsHub MLflow server |
-| `MLFLOW_TRACKING_USERNAME` | production | DagsHub username |
-| `MLFLOW_TRACKING_PASSWORD` | production | DagsHub token |
-| `HF_TOKEN` | production | Hugging Face Hub model registry |
+| `DATABASE_URL` | everything | Neon Postgres |
+| `ENVIRONMENT` | no (`local`) | `local`, `ci` or `production`; in production, tracking refuses to fall back to a local store |
+| `MLFLOW_TRACKING_URI` | tune, backtest, train | DagsHub MLflow server |
+| `MLFLOW_TRACKING_USERNAME` | tune, backtest, train | DagsHub username |
+| `MLFLOW_TRACKING_PASSWORD` | tune, backtest, train | DagsHub token |
+| `HF_TOKEN` | `train --promote` | Hugging Face write token |
+| `MODEL_REPO_ID` | API | Hugging Face model to serve, e.g. `Azharkhan79/nem-forecast-vic1` |
+| `MODEL_REVISION` | API (default `main`) | Pin to a git-SHA tag in production |
+| `MODEL_DIR` | API, optional | Serve a model from disk instead of the Hub |
+| `MODEL_CACHE_DIR` | API (default `.cache/models`) | Where the downloaded model is cached |
+| `GIT_SHA` | API, optional | Commit of the running code, set at image build |
+
+Each component checks only the credentials it uses: the public API holds the database URL and a
+model id, never MLflow or Hugging Face write tokens.
 
 The scheduled [Ingest workflow](.github/workflows/ingest.yml) reads `DATABASE_URL` from a
 repository secret: `gh secret set DATABASE_URL` and paste the Neon connection string.

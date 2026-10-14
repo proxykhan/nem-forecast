@@ -80,30 +80,28 @@ def test_secrets_never_appear_in_repr(monkeypatch: pytest.MonkeyPatch) -> None:
         assert secret not in rendered
 
 
-def test_production_requires_every_credential(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_serving_settings_have_safe_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DATABASE_URL", NEON_URL)
-    monkeypatch.setenv("ENVIRONMENT", "production")
-    monkeypatch.setenv("MLFLOW_TRACKING_URI", "https://dagshub.com/me/nem-forecast.mlflow")
 
-    with pytest.raises(ValidationError, match="HF_TOKEN") as excinfo:
-        load()
+    settings = load()
 
-    assert "MLFLOW_TRACKING_PASSWORD" in str(excinfo.value)
-    assert "MLFLOW_TRACKING_URI" not in str(excinfo.value)
+    assert settings.model_repo_id is None
+    assert settings.model_revision == "main"
+    assert settings.model_dir is None
+    assert settings.git_sha is None
 
 
-def test_production_with_every_credential_loads(monkeypatch: pytest.MonkeyPatch) -> None:
-    for name, value in {
-        "DATABASE_URL": NEON_URL,
-        "ENVIRONMENT": "production",
-        "MLFLOW_TRACKING_URI": "https://dagshub.com/me/nem-forecast.mlflow",
-        "MLFLOW_TRACKING_USERNAME": "me",
-        "MLFLOW_TRACKING_PASSWORD": "mlflow-token",
-        "HF_TOKEN": "hf_Xq7pL2mN9vR4",
-    }.items():
-        monkeypatch.setenv(name, value)
+def test_serving_settings_from_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DATABASE_URL", NEON_URL)
+    monkeypatch.setenv("MODEL_REPO_ID", "someone/nem-forecast-vic1")
+    monkeypatch.setenv("MODEL_REVISION", "fa90c4b4c9a3")
+    monkeypatch.setenv("GIT_SHA", "abc1234")
 
-    assert load().environment is Environment.PRODUCTION
+    settings = load()
+
+    assert settings.model_repo_id == "someone/nem-forecast-vic1"
+    assert settings.model_revision == "fa90c4b4c9a3"
+    assert settings.git_sha == "abc1234"
 
 
 def test_unknown_environment_rejected(monkeypatch: pytest.MonkeyPatch) -> None:

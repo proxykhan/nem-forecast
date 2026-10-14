@@ -1,0 +1,138 @@
+"""The forecasting model: downloaded once at startup, cached on disk, never fetched per request.
+
+Loading runs in a background thread so the process answers liveness checks immediately; until
+it finishes (or if it fails) the service reports itself not ready and refuses to forecast with a
+503 problem. A download from Hugging Face Hub lands in ``MODEL_CACHE_DIR``; a restarted process
+with a warm cache skips the transfer.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import threading
+from collections.abc import Callable
+from dataclasses import dataclass
+from datetime import datetime
+from enum import StrEnum
+from pathlib import Path
+from typing import Any
+
+import polars as pl
+from huggingface_hub import snapshot_download
+
+from nem_forecast.config import Settings
+from nem_forecast.models.base import METADATA_FILE, DirectModel
+from nem_forecast.models.catalog import load_model
+from nem_forecast.schemas import Region
+from nem_forecast.serve.problems import Problem
+
+log = logging.getLogger(__name__)
+
+Downloader = Callable[..., str]
+
+
+class ModelState(StrEnum):
+    NOT_CONFIGURED = "not_configured"
+    LOADING = "loading"
+    READY = "ready"
+    FAILED = "failed"
+
+
+@dataclass(frozen=True)
+class LoadedModel:
+    model: DirectModel
+    name: str
+    version: str  # the git-SHA tag the model was published under (12 characters)
+    region: Region
+    max_horizon: int
+    trained_to: datetime | None
+    source: str
+
+
+class ModelStore:
+    def __init__(
+        self,
+        settings: Settings,
+        *,
+        download: Downloader = snapshot_download,
+    ) -> None:
+        self._settings = settings
+        self._download = download
+        self._listeners: list[Callable[[LoadedModel], None]] = []
+        self._predict_lock = threading.Lock()
+        self.loaded: LoadedModel | None = None
+        self.error: str | None = None
+        configured = settings.model_dir is not None or settings.model_repo_id is not None
+        self.state = ModelState.LOADING if configured else ModelState.NOT_CONFIGURED
+
+    def on_loaded(self, listener: Callable[[LoadedModel], None]) -> None:
+        """Call ``listener`` with the model once loaded (immediately if it already is)."""
+        self._listeners.append(listener)
+        if self.loaded is not None:
+            listener(self.loaded)
+
+    def load(self) -> None:
+        """Fetch (or reuse the cached) model and load it; blocking, run off the event loop."""
+        if self.state is not ModelState.LOADING:
+            return
+        try:
+            directory, source = self._locate()
+            model = load_model(directory)
+            metadata: dict[str, Any] = json.loads(
+                (directory / METADATA_FILE).read_text(encoding="utf-8")
+            )
+            trained = metadata.get("trained_on")
+            self.loaded = LoadedModel(
+                model=model,
+                name=model.name,
+                version=str(metadata["version"])[:12],
+                region=Region(metadata.get("region", Region.VIC1.value)),
+                max_horizon=max(model.horizons),
+                trained_to=datetime.fromisoformat(trained[1]) if trained else None,
+                source=source,
+            )
+            self.state = ModelState.READY
+            log.info("loaded %s %s from %s", self.loaded.name, self.loaded.version, source)
+            for listener in self._listeners:
+                listener(self.loaded)
+        except Exception as exc:
+            self.error = f"{type(exc).__name__}: {exc}"
+            self.state = ModelState.FAILED
+            log.exception("model failed to load")
+
+    def require(self) -> LoadedModel:
+        if self.loaded is not None:
+            return self.loaded
+        if self.state is ModelState.LOADING:
+            raise Problem(
+                503,
+                "model-loading",
+                "Model is still loading",
+                "The service has just started and is loading its model; retry shortly.",
+                headers={"Retry-After": "10"},
+            )
+        raise Problem(
+            503,
+            "model-unavailable",
+            "Model unavailable",
+            "No forecasting model could be loaded; see /ready for the reason.",
+        )
+
+    def predict(self, features: pl.DataFrame) -> pl.DataFrame:
+        loaded = self.require()
+        with self._predict_lock:  # one LightGBM prediction at a time on the shared boosters
+            return loaded.model.predict(features)
+
+    def _locate(self) -> tuple[Path, str]:
+        settings = self._settings
+        if settings.model_dir is not None:
+            return settings.model_dir, f"local:{settings.model_dir}"
+        assert settings.model_repo_id is not None  # noqa: S101 - guaranteed by LOADING state
+        settings.model_cache_dir.mkdir(parents=True, exist_ok=True)
+        path = self._download(
+            settings.model_repo_id,
+            revision=settings.model_revision,
+            cache_dir=settings.model_cache_dir,
+        )
+        return Path(path), f"hf:{settings.model_repo_id}@{settings.model_revision}"

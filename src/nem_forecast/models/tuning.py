@@ -27,12 +27,12 @@ from nem_forecast.features.build import LABEL, assert_no_leakage, build_features
 from nem_forecast.features.series import PERIOD, TIME_ZONE
 from nem_forecast.models.base import TRAIN_ORIGIN_EVERY, training_frame
 from nem_forecast.models.lgbm import LightGBMDirect
-from nem_forecast.schemas import Region
+from nem_forecast.models.params import MAX_TRIALS, VALIDATION_DAYS, load_params, params_path
 
 log = logging.getLogger(__name__)
 
-VALIDATION_DAYS = 60
-MAX_TRIALS = 50
+__all__ = ["MAX_TRIALS", "VALIDATION_DAYS", "load_params", "params_path"]  # re-exported
+
 SEED = 42
 
 TrialCallback = Callable[[int, dict[str, Any], float], None]
@@ -121,10 +121,6 @@ def tune_lightgbm(
     return TuningResult(split, best, float(study.best_value), history)
 
 
-def params_path(region: Region, directory: Path = Path("config")) -> Path:
-    return directory / f"lightgbm_{region.value.lower()}.json"
-
-
 def save_params(path: Path, result: TuningResult, *, git_sha: str | None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     document = {
@@ -136,10 +132,3 @@ def save_params(path: Path, result: TuningResult, *, git_sha: str | None) -> Non
         "tuned_at": datetime.now(UTC).isoformat(),
     }
     path.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
-
-
-def load_params(path: Path) -> dict[str, Any] | None:
-    if not path.exists():
-        return None
-    params: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))["params"]
-    return params

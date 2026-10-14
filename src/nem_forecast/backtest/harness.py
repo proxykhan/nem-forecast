@@ -21,7 +21,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
 from functools import partial
-from typing import Protocol
+from typing import Any, Protocol
 
 import polars as pl
 from sqlalchemy import Engine, text
@@ -244,6 +244,22 @@ def save_results(
             )
             run_ids[model] = run_id
     return run_ids
+
+
+def forecaster_params(forecaster: Forecaster) -> dict[str, Any]:
+    """Plain description of a forecaster, for run records."""
+    params: dict[str, Any] = {
+        "model": forecaster.name,
+        "model_kind": getattr(forecaster, "kind", "model"),
+        "description": getattr(forecaster, "description", ""),
+    }
+    if rule := getattr(forecaster, "point", None):
+        params["rule_feature"] = rule
+    for key, value in (getattr(forecaster, "params", None) or {}).items():
+        params[f"lgbm.{key}"] = value
+    if groups := getattr(forecaster, "horizon_groups", None):
+        params["horizon_groups"] = "|".join(f"{g[0]}-{g[-1]}" for g in groups)
+    return params
 
 
 def _check_predictions(predicted: pl.DataFrame, frame: pl.DataFrame, name: str) -> None:

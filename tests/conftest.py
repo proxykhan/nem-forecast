@@ -15,6 +15,10 @@ _CONFIG_ENV_VARS = (
     "MLFLOW_TRACKING_PASSWORD",
     "HF_TOKEN",
     "GITHUB_SHA",  # set in GitHub Actions; would make every checkout look committed
+    "MODEL_REPO_ID",
+    "MODEL_REVISION",
+    "MODEL_DIR",
+    "GIT_SHA",
 )
 
 

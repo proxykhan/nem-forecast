@@ -13,7 +13,7 @@ from pathlib import Path
 
 import mlflow
 
-from nem_forecast.config import Settings
+from nem_forecast.config import Environment, Settings
 
 log = logging.getLogger(__name__)
 
@@ -30,6 +30,10 @@ def configure_mlflow(settings: Settings) -> str:
                 settings.mlflow_tracking_password.get_secret_value()
             )
         uri = settings.mlflow_tracking_uri
+    elif settings.environment is Environment.PRODUCTION:
+        raise RuntimeError(
+            "MLFLOW_TRACKING_URI is required in production; refusing to track locally"
+        )
     else:
         # Absolute, because MLflow caches stores by URI and a relative path would stay bound to
         # whichever directory first opened it.

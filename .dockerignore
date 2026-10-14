@@ -1,0 +1,9 @@
+# Allowlist: the image is built from the package source and lock file only. Nothing else from
+# the working tree (.env, data caches, MLflow stores, trained artifacts) can reach it.
+*
+!pyproject.toml
+!uv.lock
+!README.md
+!LICENSE
+!src/
+**/__pycache__

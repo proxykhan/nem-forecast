@@ -1,6 +1,9 @@
 """``nem-forecast`` command-line entrypoint.
 
-Commands for later phases are stubs that raise NotImplementedError naming their phase.
+Ingestion and serving work with the core install. Commands that train, track or report import
+their heavy tools (MLflow, Optuna, matplotlib) inside the command, from the ``train`` extra, so
+the scheduled ingest job and the serving image never need them. Commands for later phases are
+stubs that raise NotImplementedError naming their phase.
 """
 
 from __future__ import annotations
@@ -13,21 +16,24 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Any
 
-import mlflow
 import polars as pl
 import typer
-from huggingface_hub import HfApi
 from sqlalchemy import Engine, text
 
 from nem_forecast import __version__
 from nem_forecast.backtest.baselines import BASELINES, Forecaster
-from nem_forecast.backtest.harness import BacktestConfig, plan_folds, run_backtest, save_results
+from nem_forecast.backtest.harness import (
+    BacktestConfig,
+    forecaster_params,
+    plan_folds,
+    run_backtest,
+    save_results,
+)
 from nem_forecast.backtest.metrics import ALL_BUCKETS, ALL_HORIZONS
-from nem_forecast.backtest.report import CHART_NAME, verdict, write_report
 from nem_forecast.config import get_settings
 from nem_forecast.db import MIGRATIONS_DIR, apply_migrations, create_db_engine
 from nem_forecast.features.build import FEATURE_VERSION, one_step_features, write_features
-from nem_forecast.features.series import load_dispatch, span, to_half_hourly
+from nem_forecast.features.series import load_half_hourly, span
 from nem_forecast.gitinfo import git_sha
 from nem_forecast.ingest.backfill import MonthStatus, default_months
 from nem_forecast.ingest.backfill import backfill as run_backfill
@@ -37,26 +43,9 @@ from nem_forecast.ingest.recent import ingest_dispatch_is
 from nem_forecast.models.base import METADATA_FILE, DirectModel
 from nem_forecast.models.catalog import MODELS
 from nem_forecast.models.lgbm import LightGBMDirect, LightGBMQuantile
-from nem_forecast.models.registry import (
-    CARD_FILES,
-    latest_backtest,
-    push_to_hub,
-    render_model_card,
-    repo_name,
-)
+from nem_forecast.models.params import MAX_TRIALS, VALIDATION_DAYS, load_params, params_path
 from nem_forecast.models.ridge import RidgeForecaster
-from nem_forecast.models.tuning import (
-    MAX_TRIALS,
-    VALIDATION_DAYS,
-    load_params,
-    params_path,
-    save_params,
-    tune_lightgbm,
-    validation_split,
-)
 from nem_forecast.schemas import NEM_TZ, Region
-from nem_forecast.tracking.client import configure_mlflow, experiment_id
-from nem_forecast.tracking.runs import MlflowBacktestObserver, MlflowTuningLogger, model_params
 
 log = logging.getLogger(__name__)
 
@@ -230,7 +219,7 @@ def build_features(
 ) -> None:
     """Build leakage-checked horizon-1 features into the features table."""
     with _database() as engine:
-        frame = one_step_features(to_half_hourly(load_dispatch(engine, region)))
+        frame = one_step_features(load_half_hourly(engine, region))
         rows = write_features(engine, region, frame)
     typer.echo(f"Wrote {rows:,} {FEATURE_VERSION} feature rows for {region}.")
 
@@ -264,10 +253,14 @@ def tune(
     test_days: Annotated[int, typer.Option(min=1, help="Backtest period to stay clear of.")] = 365,
 ) -> None:
     """Tune LightGBM with Optuna on a validation split before the backtest period."""
+    from nem_forecast.models.tuning import save_params, tune_lightgbm, validation_split
+    from nem_forecast.tracking.client import configure_mlflow
+    from nem_forecast.tracking.runs import MlflowTuningLogger
+
     configure_mlflow(get_settings())
     sha = git_sha()
     with _database() as engine:
-        series = to_half_hourly(load_dispatch(engine, region))
+        series = load_half_hourly(engine, region)
     split = validation_split(series, BacktestConfig(test_days=test_days), validation_days)
     with MlflowTuningLogger(region=region, split=split, git_sha=sha, trials=trials) as logger:
         result = tune_lightgbm(series, split, trials=trials, on_trial=logger)
@@ -298,6 +291,10 @@ def backtest(
     track: Annotated[bool, typer.Option(help="Log runs to MLflow.")] = True,
 ) -> None:
     """Walk-forward backtest of the baselines and models; writes model_runs and a report."""
+    from nem_forecast.backtest.report import CHART_NAME, verdict, write_report
+    from nem_forecast.tracking.client import configure_mlflow
+    from nem_forecast.tracking.runs import MlflowBacktestObserver
+
     started = datetime.now(UTC)
     config = BacktestConfig(test_days=test_days, refit_every_days=refit_every_days)
     sha = git_sha()
@@ -305,7 +302,7 @@ def backtest(
         configure_mlflow(get_settings())
     forecasters = _forecasters(region, with_models=models)
     with _database() as engine:
-        series = to_half_hourly(load_dispatch(engine, region))
+        series = load_half_hourly(engine, region)
         observer = (
             MlflowBacktestObserver(
                 region=region,
@@ -327,7 +324,7 @@ def backtest(
                 git_sha=sha,
                 started_at=started,
                 mlflow_run_ids=mlflow_runs,
-                params={f.name: model_params(f) for f in forecasters},
+                params={f.name: forecaster_params(f) for f in forecasters},
             )
             if save
             else None
@@ -371,6 +368,18 @@ def train(
     ] = False,
 ) -> None:
     """Train a model on all data so far; optionally promote it to Hugging Face Hub."""
+    import mlflow
+    from huggingface_hub import HfApi
+
+    from nem_forecast.models.registry import (
+        CARD_FILES,
+        latest_backtest,
+        push_to_hub,
+        render_model_card,
+        repo_name,
+    )
+    from nem_forecast.tracking.client import configure_mlflow, experiment_id
+
     settings = get_settings()
     sha = git_sha()
     token = settings.hf_token.get_secret_value() if settings.hf_token else None
@@ -383,7 +392,7 @@ def train(
     started = datetime.now(UTC)
     repo_id = f"{HfApi(token=token).whoami()['name']}/{repo_name(region)}" if token else None
     with _database() as engine:
-        series = to_half_hourly(load_dispatch(engine, region))
+        series = load_half_hourly(engine, region)
         forecaster.fit(series)
         directory = output_dir / f"{region.value.lower()}-{model}"
         forecaster.save(directory, version=sha or "unknown")
@@ -404,7 +413,7 @@ def train(
             tags={"git_sha": sha or "unknown", "region": region.value},
         ) as run:
             mlflow.log_params(
-                model_params(forecaster)
+                forecaster_params(forecaster)
                 | {
                     "features": ",".join(metadata["features"]),
                     "data_start": metadata["trained_on"][0],
@@ -458,9 +467,16 @@ def _record_training(
 
 
 @app.command()
-def serve() -> None:
-    """Start the FastAPI inference service."""
-    raise _not_yet(4, "Serving")
+def serve(
+    host: Annotated[str, typer.Option(help="Interface to bind.")] = "0.0.0.0",  # noqa: S104
+    port: Annotated[
+        int | None, typer.Option(help="Port; defaults to $PORT (set by Render) or 8000.")
+    ] = None,
+) -> None:
+    """Start the forecast API (FastAPI under uvicorn)."""
+    from nem_forecast.serve.__main__ import run
+
+    run(host=host, port=port)
 
 
 @app.command()
