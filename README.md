@@ -8,10 +8,12 @@
 
 Half-hourly electricity demand forecasts for Victoria (`VIC1`) in Australia's National
 Electricity Market, from 30 minutes to 24 hours ahead, each with a 10th-90th percentile range.
-It ingests AEMO's public 5-minute data every six hours, evaluates every model against honest
+It ingests AEMO's public 5-minute data every half-hour, evaluates every model against honest
 baselines in a walk-forward backtest, tracks experiments, publishes the winning model with a
-generated model card, and serves forecasts from an API that records every forecast it gives out
-so that it can be scored later. Demand forecasting in Victoria is hard in ways a tutorial hides:
+generated model card, and serves forecasts from an API that records every forecast it gives out.
+Every logged forecast is then scored against the demand that actually arrived, inputs and outputs
+are checked for drift daily, and a retrained model reaches production only by beating the served
+one at every horizon. Demand forecasting in Victoria is hard in ways a tutorial hides:
 rooftop solar removes a weather-dependent slice of demand in the middle of the day, so the
 hardest hours are now noon rather than the evening peak; AEMO keeps its clock on fixed AEST while
 people live on daylight-saving time; published values are revised after the fact; and a forecast
@@ -23,6 +25,7 @@ lag features.
 | **Live API** | [nem-forecast-api.onrender.com/docs](https://nem-forecast-api.onrender.com/docs) (free tier: the first request after a quiet spell takes about a minute) |
 | **Experiments** | [MLflow on DagsHub](https://dagshub.com/proxykhan/nem-forecast.mlflow/#/experiments): every backtest, fold and tuning trial |
 | **Model card** | [Azharkhan79/nem-forecast-vic1](https://huggingface.co/Azharkhan79/nem-forecast-vic1), versioned by git SHA |
+| **Monitoring report** | [proxykhan.github.io/nem-forecast](https://proxykhan.github.io/nem-forecast/): daily checks and the Evidently drift report |
 | **Backtest report** | [docs/backtest](docs/backtest/README.md), regenerated nightly |
 
 ## Results
@@ -90,6 +93,59 @@ What the numbers do and do not show:
 - **Tuning bought little:** 50 Optuna trials improved validation MAE by 3.6%. The features matter
   far more than the hyperparameters.
 
+## Live: does the backtest hold up?
+
+![The monitoring dashboard](docs/images/dashboard.png)
+
+The [dashboard](dashboard/README.md) and the daily
+[monitoring report](https://proxykhan.github.io/nem-forecast/) score every forecast the live API
+has served against the demand that actually arrived (see [Monitoring](#monitoring-and-retraining)).
+
+**As of 15 October 2026**, the day after the forecast client started, 37 forecasts from 3
+origins have been scored:
+
+| Horizons | Forecasts | Realised MAE (MW) | Backtest MAE for the same forecasts (MW) | Ratio |
+|---|--:|--:|--:|--:|
+| 30 min | 3 | 54 | 104 | 0.52 |
+| 1-1.5 h | 5 | 180 | 185 | 0.97 |
+| 2-3 h | 6 | 225 | 300 | 0.75 |
+| 3.5-6 h | 12 | 239 | 286 | 0.84 |
+| 6.5-12 h | 11 | 170 | 212 | 0.80 |
+| **All** | **37** | **193** | **238** | **0.81** |
+
+Live error is not worse than the backtest so far: 0.81 of what the backtest predicts for these
+forecasts. Thirty-seven forecasts from three origins on a single day are far too few to call it
+better, though; one cloudy afternoon would move these numbers by more than the gap. The monitor republishes this
+table every day, and the realised-error alert waits for three days of scores (6,912 forecasts)
+before it judges anything.
+
+**Comparing like with like.** The headline backtest MAE (351 MW) is a year-long average over
+every horizon and every hour. Live forecasts arrive in a very different mix: a forecast issued in
+the evening has only its first few horizons scored by the next morning, and those fall
+overnight, when demand is easiest to forecast. Set against 351 MW, the first live figure of
+193 MW looked 45% better than the backtest. That was an artefact of the mix, not a better model.
+So the monitor never compares with the headline figure. It takes the backtest's MAE for each (horizon,
+time-of-day) cell, weights it by how many live forecasts fell in that cell, and compares against
+that: the error the backtest predicts for *these* forecasts.
+
+Two findings from putting monitoring on a real feed:
+
+- **Evidently's default drift threshold would have fired every week.** Scored against its own
+  seasonal reference, every one of the last 104 weeks crossed the default (normed Wasserstein
+  distance 0.1) on at least one feature. Weekly demand moves with the weather far more than
+  that, and this model has no weather inputs, so "drift" at 0.1 is just a cold week. The
+  thresholds are instead calibrated on that history: each feature's threshold sits at the 0.991
+  quantile of its own weekly score, where the alert would have fired in 6% of past weeks rather
+  than 100% ([calibration](config/drift_vic1.json), `nem-forecast calibrate-drift`). The current
+  week passes, though `same_slot_prev_week` came close (0.741 against 0.771).
+- **GitHub's scheduler is the least reliable part of the system.** Scheduled runs on this
+  repository started 30 minutes to 5.6 hours late, and some never ran. A forecast is only as
+  fresh as the last ingest, so the half-hourly job reads from the latest interval already
+  loaded rather than a fixed window, and catches up after a late run instead of leaving a gap.
+  It also means the "no forecasts for 6 hours" alert can be set off by the scheduler rather
+  than the API. That is still a true alert (nobody was being served forecasts), and it is the
+  first thing a real scheduler would fix.
+
 ## Architecture
 
 ```mermaid
@@ -101,13 +157,17 @@ flowchart LR
     subgraph actions["GitHub Actions"]
         ingest["Ingest and forecast<br/>every half-hour"]
         nightly["Nightly backtest"]
+        monitor["Monitor<br/>daily"]
+        retrain["Retrain<br/>on alert or by hand"]
         cd["CI and CD<br/>tests, image smoke test"]
         keepalive["Keep-alive<br/>business hours"]
     end
-    db[("Neon Postgres<br/>raw_dispatch, history,<br/>predictions, model_runs")]
+    db[("Neon Postgres<br/>raw_dispatch, history,<br/>predictions, scores, runs")]
     mlflow["DagsHub MLflow<br/>experiments"]
     hub["Hugging Face Hub<br/>model + card"]
     api["Render<br/>FastAPI forecast API"]
+    pages["GitHub Pages<br/>Evidently report"]
+    dash["Vercel<br/>Next.js dashboard"]
     users(["API clients"])
 
     dispatch --> ingest --> db
@@ -122,15 +182,24 @@ flowchart LR
     users --> api
     keepalive -. "/health" .-> api
     ingest -- "GET /forecast/latest" --> api
+    db -- "forecasts + actuals" --> monitor
+    monitor -- "scores, verdicts" --> db
+    monitor --> pages
+    monitor -- "error or drift alert" --> retrain
+    retrain -- "only if it wins everywhere" --> hub
+    retrain -- "render.yaml pin" --> repo
+    db -- "read-only login" --> dash
 ```
 
 | Service | Role | Free tier |
 |---|---|---|
-| GitHub Actions | CI, CD, scheduled ingest, nightly backtest, keep-alive | Unlimited minutes on public repos |
-| Neon Postgres | Raw data, revision history, served predictions, run metrics | 0.5 GB (about 120 MB used) |
+| GitHub Actions | CI, CD, ingest, nightly backtest, monitoring, retraining, keep-alive | Unlimited minutes on public repos |
+| Neon Postgres | Raw data, revision history, served predictions, their scores, run records | 0.5 GB (about 120 MB used) |
 | DagsHub MLflow | Experiment tracking | Small artifact storage: metrics and params, not files |
 | Hugging Face Hub | Model registry and card | Public models |
 | Render | Forecast API (Docker) | 0.1 CPU, 512 MB, sleeps after 15 minutes idle |
+| GitHub Pages | Daily monitoring report | Public site, latest run only |
+| Vercel | Monitoring dashboard (Next.js) | Hobby plan |
 
 ## What makes it production-shaped
 
@@ -145,6 +214,10 @@ flowchart LR
   than written by hand ([Models](#models)).
 - **Every served forecast is logged before it is returned,** so monitoring can score all of
   them; a forecast that can't be recorded isn't served ([Serving](#serving)).
+- **Live error is compared like with like.** Realised error is set against what the backtest
+  predicts for the same mix of horizons and hours, drift thresholds are calibrated on two years of
+  history rather than defaulted, and a retrained model is promoted only if it wins at every
+  horizon on data neither model trained on ([Monitoring](#monitoring-and-retraining)).
 - **Deploys are gated and verified:** tests on Python 3.12 and 3.13, a dependency audit, a
   secret scan, a smoke test of the built image, then Render deploys that exact commit and the
   pipeline waits until the live service reports it ([Deployment](#deployment-and-cicd)).
@@ -160,8 +233,8 @@ The free tiers shaped this design; each choice below is where it would change fi
   lands) and the API would serve a table read. That removes model loading and feature building
   from the request path, and with them the free tier's one-minute cold start (Python's web stack
   alone takes about 40 s to import on 0.1 CPU).
-- **A real orchestrator.** GitHub's cron is best-effort, drifts by minutes and is disabled after
-  60 quiet days. Dagster or Airflow would give retries, backfill semantics, data-arrival triggers
+- **A real orchestrator.** GitHub's cron is best-effort (runs here started up to 5.6 hours late,
+  some never) and is disabled after 60 quiet days. Dagster or Airflow would give retries, backfill semantics, data-arrival triggers
   (AEMO publishes every 5 minutes) and alerting on missed runs.
 - **Weather and rooftop solar as inputs.** The largest remaining error is the midday trough.
   Bureau of Meteorology temperature and cloud forecasts, plus AEMO's rooftop PV estimates, are the
@@ -175,7 +248,7 @@ The free tiers shaped this design; each choice below is where it would change fi
   fit 0.5 GB.
 - **A private registry with staged rollout.** Shadow-deploy a new model next to the incumbent,
   compare live error, then promote, with automatic rollback on an error budget; today the
-  promotion gate is a backtest only.
+  promotion gate is a comparison on recent historical data, not on live traffic.
 - **Observability that someone watches.** `/metrics` exists, but nothing scrapes it on Render's
   free tier: Prometheus and Grafana, central logs, and alerts on latency, error rate and
   logging failures.
@@ -209,7 +282,7 @@ Two AEMO feeds, both public and keyless:
 
 | Feed | Used for | Format |
 |---|---|---|
-| NEMWeb `Reports/Current/DispatchIS_Reports` | Scheduled ingest every half-hour (last 2 h; 24 h every 6 hours) | One zipped MMS report per 5-minute interval; about 48 hours retained |
+| NEMWeb `Reports/Current/DispatchIS_Reports` | Scheduled ingest every half-hour (from the latest loaded interval; the last 24 h every 6 hours) | One zipped MMS report per 5-minute interval; about 48 hours retained |
 | aemo.com.au monthly `PRICE_AND_DEMAND_<yyyymm>_<region>.csv` | Backfill, and repairing gaps | Plain CSV, one file per region per month, updated daily |
 
 What the real files showed, and what the code does about it:
@@ -352,13 +425,90 @@ The 30-second cold start is met on a normal CPU but not on 0.1 CPU, where import
 uvicorn and SQLAlchemy alone takes about 40 s; the keep-alive workflow and the precompute design
 above are the answers.
 
+## Monitoring and retraining
+
+Every forecast the API serves is in `predictions`. A daily job ([monitor.yml](.github/workflows/monitor.yml))
+turns them into evidence, and retraining ([retrain.yml](.github/workflows/retrain.yml)) acts on it
+behind a gate.
+
+**Scoring** ([scoring.py](src/nem_forecast/monitor/scoring.py)). Once a target half-hour has all
+six of its 5-minute intervals, each forecast for it gets a row in `prediction_scores`: forecast,
+interval, actual, error. A forecast is identified by (model version, origin, target), so a
+forecast requested ten times is scored once, from its first serving. The actual is the same
+half-hour mean the model was trained on. AEMO revises data, so every run re-checks the last 35
+days: when an actual has changed, the old score is kept with `superseded_at` set and a new score
+is added. Metrics reuse the backtest's own code, so a live MAE and a backtest MAE are computed
+identically.
+
+**Drift** ([drift.py](src/nem_forecast/monitor/drift.py)), with Evidently, over the last 7 days:
+
+- *Data drift* on the data-derived features (lags and rolling statistics), one row per
+  half-hour. Calendar features are left out: one week always holds one month and seven
+  weekdays, so their "drift" describes the window, not the data.
+- *Prediction drift* on the forecasts actually served, against the model's own forecasts over
+  the reference.
+- *Target drift* on realised demand.
+
+The reference is the served model's training window at the same time of year (origins within 28
+days of today's date, in every year it saw): this spring against previous springs. Every column
+uses one pinned method, the normed Wasserstein distance, with the calibrated thresholds described
+[above](#live-does-the-backtest-hold-up). Each run writes the Evidently HTML report and a JSON
+verdict, published to GitHub Pages and kept with the run for 90 days.
+
+**Alerts** ([alerts.py](src/nem_forecast/monitor/alerts.py)), each threshold justified in the code:
+
+| Check | Fires when | Why this threshold | On breach |
+|---|---|---|---|
+| Realised error | Rolling 7-day MAE above seasonal naive's backtest MAE (currently 507 MW), with at least 3 days of scores | A model worse than "same time yesterday" has negative value. Its own backtest MAE is a year's average that a hot or cloudy week legitimately exceeds; 7 days covers a full weekly cycle | Issue, retrain |
+| Feature drift | Any feature's drift score reaches its calibrated threshold | Calibrated to fire in about 1 week in 20 of the last two years; Evidently's default fired in all of them | Issue, retrain |
+| Prediction volume | No forecast logged for 6 hours (checked over 30 hours) | 12 missed half-hourly requests in a row: longer than scheduler delays, cold starts or a redeploy | Issue only: an outage is not a model problem |
+
+A breach opens a GitHub issue labelled for its check, linking the Evidently report and embedding
+the JSON verdict (the API cannot attach files to issues). While that issue is open, later
+breaches comment on it rather than opening more.
+
+**Retraining** ([retrain.py](src/nem_forecast/monitor/retrain.py)). Started by an error or drift
+alert, or by hand:
+
+1. The holdout is the last 14 days, but never earlier than the end of the incumbent's training
+   data, so the incumbent gets no in-sample advantage. With less than 7 unseen days, retraining
+   is skipped: a fair comparison is impossible, and pointless.
+2. A candidate (the served model's type, current tuned parameters) is trained on everything
+   before the holdout. Both models forecast the same holdout rows from every half-hour.
+3. The candidate wins only if its MAE is lower in **every** horizon group (1 | 2-3 | 4-6 | 7-12 |
+   13-24 | 25-48). Better on average but worse 30 minutes ahead is not a win.
+4. On a win, the same recipe is refit on all data up to now, tagged with a release that names
+   its data and code (`20261020-1430-3bff1a7`; tags are never moved), published with the
+   comparison in its model card, downloaded back and checked to reproduce, and pinned in
+   `render.yaml`. Render's Blueprint sync applies the pin and CD verifies the live service
+   serves exactly that model.
+5. Otherwise nothing is promoted, and an issue names the horizons that regressed.
+
+Every decision, including rejections and skips, is a row in `retrain_runs`.
+
+**Dashboard** ([dashboard/](dashboard/README.md)). A Next.js app on Vercel showing the latest
+forecast and its interval against actuals as they land (with the forecast from a day earlier, to
+see how forecasts turn out), realised MAE by horizon over 30 days against the backtest, the
+checks and drift scores, and the last retrain. It reads Neon on the server through a read-only
+login (`nem-forecast grant-reader`) and regenerates at most every five minutes, so it never waits
+for the API to wake up.
+
+```bash
+uv run nem-forecast score            # score what has landed; realised vs backtest by horizon group
+uv run nem-forecast monitor          # score, drift, alerts and the site (MODEL_REPO_ID/REVISION set)
+uv run nem-forecast calibrate-drift  # recompute drift thresholds from history
+uv run nem-forecast retrain          # dry run: the comparison only (--promote to publish)
+```
+
 ## Deployment and CI/CD
 
 | Workflow | When | What |
 |---|---|---|
-| [CI](.github/workflows/ci.yml) | Pull requests; called by CD | Ruff, mypy (strict), tests on Python 3.12 and 3.13 against a Postgres service (80% coverage gate), `pip-audit` on every locked dependency, `gitleaks` over the whole history |
-| [CD](.github/workflows/cd.yml) | Every push to `main` | CI, then build the image and smoke-test `/health`, `/ready` and `/metrics` against Postgres and the real model, then trigger Render's deploy hook for that exact commit, then wait until the live service reports the commit and serves a forecast; publishes the coverage badge |
-| [Ingest and forecast](.github/workflows/ingest.yml) | Every half-hour | Latest 5-minute data into Neon (24 hours back every 6 hours, to fill gaps), then requests `/forecast/latest` like a client would, so the live service logs a forecast from every half-hour for monitoring to score |
+| [CI](.github/workflows/ci.yml) | Pull requests; called by CD | Ruff, mypy (strict), tests on Python 3.12 and 3.13 against a Postgres service (80% coverage gate), `pip-audit` on every locked dependency, `gitleaks` over the whole history; the dashboard's lint, type check, build and `npm audit` |
+| [CD](.github/workflows/cd.yml) | Every push to `main` | CI, then build the image and smoke-test `/health`, `/ready` and `/metrics` against Postgres and the real model, then trigger Render's deploy hook for that exact commit, then wait until the live service reports the commit and serves a forecast from the model `render.yaml` pins; publishes the coverage badge |
+| [Ingest and forecast](.github/workflows/ingest.yml) | Every half-hour | 5-minute data since the latest loaded interval into Neon (the whole last day every 6 hours, for revisions), then requests `/forecast/latest` like a client would, so the live service logs a forecast from every half-hour for monitoring to score |
+| [Monitor](.github/workflows/monitor.yml) | 06:23 Melbourne | Scores served forecasts, checks drift, evaluates the alerts, publishes the report to GitHub Pages, opens issues; starts Retrain on an error or drift breach |
+| [Retrain](.github/workflows/retrain.yml) | On alert, or by hand | Champion/challenger comparison; on a win, publishes the model, pins it in `render.yaml` and starts CD; on a loss, opens an issue |
 | [Nightly backtest](.github/workflows/backtest.yml) | 02:37 Melbourne | Full backtest on the latest data, logged to MLflow, recorded and pruned to 30 days in Neon; commits the refreshed report and the results tables above |
 | [Keep-alive](.github/workflows/keepalive.yml) | Every 10 min, Mon-Fri 08:00-18:00 Melbourne | Pings `/health` so the free instance stays warm when people use it (about 220 of 750 free hours a month) |
 
@@ -385,7 +535,10 @@ are never edited; a change is always a new file.
 | `ingest_log` | One row per load batch: period, counts, missing intervals, completeness |
 | `features` | Horizon-1 feature rows (`v1`) with their data cutoff; multi-horizon frames are built in memory by the same code |
 | `predictions` | Every forecast served, the ground truth for monitoring |
-| `model_runs`, `model_run_metrics` | Backtest and training runs, with metrics by horizon and time of day |
+| `prediction_scores` | Realised error of each forecast; superseded scores kept when an actual is revised |
+| `model_runs`, `model_run_metrics` | Backtest, training and retraining runs, with metrics by horizon and time of day |
+| `monitor_runs` | Each daily check: drift verdict, alerts, realised against backtest |
+| `retrain_runs` | Each retraining decision (promoted, rejected or skipped) and its comparison |
 
 All timestamps are `TIMESTAMPTZ`. AEMO market time is fixed AEST (UTC+10) and does not follow
 Victorian daylight saving.
@@ -402,18 +555,22 @@ model id, never MLflow or Hugging Face write tokens.
 | `DATABASE_URL` | everything | Neon Postgres |
 | `ENVIRONMENT` | everything (default `local`) | In `production`, tracking refuses to fall back to a local store |
 | `MLFLOW_TRACKING_URI`, `MLFLOW_TRACKING_USERNAME`, `MLFLOW_TRACKING_PASSWORD` | tune, backtest, train | DagsHub MLflow |
-| `HF_TOKEN` | `train --promote` | Hugging Face write token |
-| `MODEL_REPO_ID`, `MODEL_REVISION` | API | Model to serve, pinned to its git-SHA tag |
+| `HF_TOKEN` | `train --promote`, `retrain --promote` | Hugging Face write token |
+| `MODEL_REPO_ID`, `MODEL_REVISION` | API, monitor, retrain | The served model, pinned to its release tag |
+| `GITHUB_TOKEN`, `GITHUB_REPOSITORY` | monitor, retrain | Opening issues; provided by GitHub Actions |
 | `MODEL_DIR` | API, optional | Serve a model from disk instead of the Hub |
 | `MODEL_CACHE_DIR`, `MODEL_WAIT_SECONDS` | API, optional | Model cache location; how long a request waits for a loading model (90 s) |
 | `GIT_SHA` | API, optional | Commit of the running code (Render's `RENDER_GIT_COMMIT` is used otherwise) |
 
 | GitHub | Kind | Used by |
 |---|---|---|
-| `DATABASE_URL` | secret | Ingest, nightly backtest |
+| `DATABASE_URL` | secret | Ingest, nightly backtest, monitor, retrain |
 | `MLFLOW_TRACKING_URI`, `MLFLOW_TRACKING_USERNAME`, `MLFLOW_TRACKING_PASSWORD` | secrets | Nightly backtest |
+| `HF_TOKEN` | secret | Retrain (promotion) |
 | `RENDER_DEPLOY_HOOK_URL` | secret | CD |
-| `RENDER_SERVICE_URL` | variable | CD verification, keep-alive |
+| `RENDER_SERVICE_URL` | variable | CD verification, keep-alive, ingest's forecast request |
+
+The dashboard's only setting is `DATABASE_URL` in Vercel, holding the read-only login.
 
 ## Development
 
@@ -437,7 +594,7 @@ service container runs them all. Override the connection with `TEST_PG_HOST`, `T
 | 3 | Models and tracking: Ridge, LightGBM, quantile LightGBM, Optuna, DagsHub MLflow, HF Hub registry | ✅ Done |
 | 4 | Serving: FastAPI, prediction logging, Docker | ✅ Done |
 | 5 | Deployment and CI/CD: Render, hardened CI, nightly backtest | ✅ Done |
-| 6 | Monitoring and retraining: realised-error scoring, Evidently drift, gated retraining, dashboard | ⬜ Not started |
+| 6 | Monitoring and retraining: realised-error scoring, Evidently drift, alerts, gated retraining, dashboard | ✅ Done |
 
 ## License
 

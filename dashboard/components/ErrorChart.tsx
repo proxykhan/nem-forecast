@@ -41,7 +41,10 @@ export default function ErrorChart({ errors }: { errors: HorizonError[] }) {
           }}
         />
         <Tooltip content={<ErrorTooltip />} />
-        <Legend wrapperStyle={{ fontSize: 13, paddingTop: 8 }} />
+        <Legend
+          wrapperStyle={{ fontSize: 13, paddingTop: 8 }}
+          formatter={(value: string) => <span style={{ color: "var(--foreground)" }}>{value}</span>}
+        />
         <Bar
           dataKey="realised"
           name="Realised, last 30 days"

@@ -58,6 +58,7 @@ export default function ForecastChart({
   }
   for (const p of previous?.points ?? []) at(p.t).previous = p.p50;
   const data = [...rows.values()].sort((a, b) => a.t - b.t);
+  const ticks = threeHourly(data[0]?.t ?? 0, data.at(-1)?.t ?? 0);
 
   return (
     <ResponsiveContainer width="100%" height={340}>
@@ -68,6 +69,7 @@ export default function ForecastChart({
           type="number"
           scale="time"
           domain={["dataMin", "dataMax"]}
+          ticks={ticks}
           tickFormatter={clock}
           tick={{ fill: COLORS.muted, fontSize: 12 }}
           stroke={COLORS.grid}
@@ -81,7 +83,10 @@ export default function ForecastChart({
           domain={["auto", "auto"]}
         />
         <Tooltip content={<ForecastTooltip />} />
-        <Legend wrapperStyle={{ fontSize: 13, paddingTop: 8 }} />
+        <Legend
+          wrapperStyle={{ fontSize: 13, paddingTop: 8 }}
+          formatter={(value: string) => <span style={{ color: "var(--foreground)" }}>{value}</span>}
+        />
         <Area
           dataKey="band"
           name="80% interval"
@@ -128,6 +133,17 @@ export default function ForecastChart({
       </ComposedChart>
     </ResponsiveContainer>
   );
+}
+
+// Ticks every three hours on the market clock (UTC+10), so they fall on 00:00, 03:00, ...
+function threeHourly(first: number, last: number): number[] {
+  const step = 3 * 3_600_000;
+  const offset = 10 * 3_600_000;
+  const ticks = [];
+  for (let t = Math.ceil((first + offset) / step) * step - offset; t <= last; t += step) {
+    ticks.push(t);
+  }
+  return ticks;
 }
 
 function ForecastTooltip({
