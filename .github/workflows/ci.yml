@@ -102,3 +102,24 @@ jobs:
         run: >
           docker run --rm -v "$PWD:/repo" zricethezav/gitleaks:v8.28.0
           git /repo --no-banner --redact --verbose
+
+  dashboard:
+    name: Dashboard (lint, types, build, npm audit)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: dashboard
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      - name: Build (without a database the page renders its notice)
+        run: npm run build
+      - name: Audit runtime dependencies
+        run: npm audit --omit=dev --audit-level=moderate
