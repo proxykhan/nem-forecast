@@ -1,5 +1,7 @@
 # nem-forecast dashboard
 
+Live at **https://nem-forecast.vercel.app/**.
+
 The monitoring view of [nem-forecast](../README.md): the latest VIC1 demand forecast with its
 80% interval against actuals as they land, realised error by horizon over the last 30 days
 against the backtest, the daily drift and alert checks, and the last retraining decision.

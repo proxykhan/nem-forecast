@@ -25,6 +25,7 @@ lag features.
 | **Live API** | [nem-forecast-api.onrender.com/docs](https://nem-forecast-api.onrender.com/docs) (free tier: the first request after a quiet spell takes about a minute) |
 | **Experiments** | [MLflow on DagsHub](https://dagshub.com/proxykhan/nem-forecast.mlflow/#/experiments): every backtest, fold and tuning trial |
 | **Model card** | [Azharkhan79/nem-forecast-vic1](https://huggingface.co/Azharkhan79/nem-forecast-vic1), versioned by git SHA |
+| **Dashboard** | [nem-forecast.vercel.app](https://nem-forecast.vercel.app/): latest forecast against actuals, realised error, drift checks, last retrain |
 | **Monitoring report** | [proxykhan.github.io/nem-forecast](https://proxykhan.github.io/nem-forecast/): daily checks and the Evidently drift report |
 | **Backtest report** | [docs/backtest](docs/backtest/README.md), regenerated nightly |
 
@@ -97,27 +98,33 @@ What the numbers do and do not show:
 
 ![The monitoring dashboard](docs/images/dashboard.png)
 
-The [dashboard](dashboard/README.md) and the daily
+The [dashboard](https://nem-forecast.vercel.app/) and the daily
 [monitoring report](https://proxykhan.github.io/nem-forecast/) score every forecast the live API
 has served against the demand that actually arrived (see [Monitoring](#monitoring-and-retraining)).
 
-**As of 15 October 2026**, the day after the forecast client started, 37 forecasts from 3
-origins have been scored:
+**As of the evening of 15 October 2026**, a day and a half after the forecast client started,
+267 forecasts from 8 origins have been scored:
 
 | Horizons | Forecasts | Realised MAE (MW) | Backtest MAE for the same forecasts (MW) | Ratio |
 |---|--:|--:|--:|--:|
-| 30 min | 3 | 54 | 104 | 0.52 |
-| 1-1.5 h | 5 | 180 | 185 | 0.97 |
-| 2-3 h | 6 | 225 | 300 | 0.75 |
-| 3.5-6 h | 12 | 239 | 286 | 0.84 |
-| 6.5-12 h | 11 | 170 | 212 | 0.80 |
-| **All** | **37** | **193** | **238** | **0.81** |
+| 30 min | 8 | 76 | 93 | 0.82 |
+| 1-1.5 h | 16 | 147 | 162 | 0.91 |
+| 2-3 h | 24 | 178 | 256 | 0.70 |
+| 3.5-6 h | 46 | 267 | 316 | 0.84 |
+| 6.5-12 h | 79 | 487 | 421 | 1.16 |
+| 12.5-24 h | 94 | 439 | 472 | 0.93 |
+| **All** | **267** | **372** | **381** | **0.98** |
 
-Live error is not worse than the backtest so far: 0.81 of what the backtest predicts for these
-forecasts. Thirty-seven forecasts from three origins on a single day are far too few to call it
-better, though; one cloudy afternoon would move these numbers by more than the gap. The monitor republishes this
-table every day, and the realised-error alert waits for three days of scores (6,912 forecasts)
-before it judges anything.
+**Live error matches the backtest: 0.98 of what it predicts for these forecasts.** The first
+look, on 37 forecasts in the early hours of that day, had put the ratio at 0.81; with seven times
+the data it has converged to the backtest, which is what an honest backtest should do. The one group running
+worse, 6.5-12 hours ahead (1.16), rests on 79 forecasts from 7 origins, and its excess comes
+from one place: the 34 that targeted the 10:00-16:00 solar window on 15 October were *all*
+over-forecast, by 823 MW on average. A one-sided miss at midday is the signature of more rooftop
+solar than usual, which this model cannot see (it has no weather inputs). It is the backtest's
+known weak spot showing up live, on one day; a group to watch, not yet a finding. The monitor
+republishes this table daily, and the realised-error alert waits for three days of scores (6,912
+forecasts) before it judges anything.
 
 **Comparing like with like.** The headline backtest MAE (351 MW) is a year-long average over
 every horizon and every hour. Live forecasts arrive in a very different mix: a forecast issued in
@@ -486,7 +493,7 @@ alert, or by hand:
 
 Every decision, including rejections and skips, is a row in `retrain_runs`.
 
-**Dashboard** ([dashboard/](dashboard/README.md)). A Next.js app on Vercel showing the latest
+**Dashboard** ([live](https://nem-forecast.vercel.app/), [code](dashboard/README.md)). A Next.js app on Vercel showing the latest
 forecast and its interval against actuals as they land (with the forecast from a day earlier, to
 see how forecasts turn out), realised MAE by horizon over 30 days against the backtest, the
 checks and drift scores, and the last retrain. It reads Neon on the server through a read-only
