@@ -72,8 +72,15 @@ jobs:
 
       - name: Request the latest forecast
         if: env.SERVICE_URL != ''
-        # A free Render instance may be asleep; the first request wakes it and waits for the model.
+        # A free Render instance may be asleep. Waking it takes 1-1.5 minutes, during which its
+        # proxy answers 502, so wait (up to 4 minutes) until it reports ready, then ask.
         run: |
+          for _ in $(seq 24); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 "$SERVICE_URL/ready" || true)
+            if [ "$code" = 200 ]; then break; fi
+            echo "service not ready yet (HTTP $code); waiting"
+            sleep 10
+          done
           curl -fsS --max-time 150 --retry 3 --retry-delay 20 --retry-all-errors \
             "$SERVICE_URL/forecast/latest" -o latest.json
           echo "Forecast from $(jq -r .forecast_origin latest.json), model $(jq -r .model_version latest.json), $(jq '.points | length' latest.json) half-hours" \
