@@ -23,6 +23,3 @@ or put `DATABASE_URL` in `dashboard/.env.local` and use `npm run dev`.
    prints a connection string once.
 2. Import the repository on Vercel with **Root Directory** `dashboard`, and add that string as
    the `DATABASE_URL` environment variable.
-
-`vercel.json` skips a rebuild when a commit does not touch `dashboard/`, so the nightly bot
-commits do not use up deployments.
