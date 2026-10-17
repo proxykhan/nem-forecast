@@ -137,13 +137,40 @@ def test_baseline_mae_reads_the_overall_backtest_figure() -> None:
     assert alerts.baseline_mae(backtest_rows("ridge", {(0, "all"): 1.0})) is None
 
 
-def test_realised_error_needs_three_days_of_scores() -> None:
-    few = scores_frame([(1, NOW, 5000.0, 6000.0)])
+def test_realised_error_needs_enough_forecasts() -> None:
+    few = scores_frame([(1, NOW - k * PERIOD, 5000.0, 6000.0) for k in range(999)])
 
     check = alerts.check_realised_error(few, baseline=560.0)
 
     assert check.status == INSUFFICIENT
     assert not check.breached
+    assert "999 forecasts over 22 days" in check.detail  # 20.8 days back from midday
+
+
+def test_realised_error_needs_three_different_days() -> None:
+    # 1,152 forecasts, but every target falls on 20 October (market time): one day of weather.
+    one_day = scores_frame(
+        [(h, NOW - k * PERIOD, 5000.0, 6000.0) for k in range(24) for h in range(1, 49)]
+    )
+
+    check = alerts.check_realised_error(one_day, baseline=560.0)
+
+    assert check.status == INSUFFICIENT
+    assert "1,152 forecasts over 1 day scored" in check.detail
+
+
+def test_realised_error_judges_the_sparse_schedule_github_actually_runs() -> None:
+    # 9 forecasts a day (what GitHub's scheduler manages) for 4 days, 48 horizons each.
+    origins = [NOW - timedelta(days=d) - k * 5 * PERIOD for d in range(4) for k in range(9)]
+    scores = scores_frame(
+        [(h, origin + h * PERIOD, 5300.0, 5000.0) for origin in origins for h in range(1, 49)]
+    )
+
+    check = alerts.check_realised_error(scores, baseline=560.0)
+
+    assert scores.height == 1_728
+    assert check.status == OK
+    assert check.value == pytest.approx(300.0)
 
 
 @pytest.mark.parametrize(("error", "status"), [(400.0, OK), (700.0, BREACHED)])

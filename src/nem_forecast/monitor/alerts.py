@@ -33,9 +33,15 @@ log = logging.getLogger(__name__)
 # Realised error is judged over 7 days: one full weekly cycle, so the mix of weekdays and weekends
 # matches the backtest's, and long enough that one stormy afternoon cannot decide it alone.
 ERROR_WINDOW = timedelta(days=7)
-# At least three days of scored forecasts (48 origins x 48 horizons a day): fewer, and a single
-# unusual day would be most of the evidence.
-MIN_SCORED = 3 * 48 * 48
+# Enough evidence is forecasts for at least 3 different days, so that one unusual day cannot be
+# most of it, and at least 1,000 of them. At 1,000 the MAE's standard error is about 3% of it,
+# small next to the gap this check looks for (a working model beats seasonal naive by tens of
+# percent). A count that assumed a forecast every half-hour (3 x 48 x 48 = 6,912) was never
+# reached: GitHub's scheduler starts only 7-9 of the 48 half-hourly runs a day here, so a whole
+# week holds about 3,000.
+MIN_SCORED = 1_000
+MIN_DAYS = 3
+MARKET_TIME_ZONE = "Australia/Brisbane"  # AEMO market time: UTC+10 all year
 # The bar is the seasonal naive baseline's backtest MAE ("same half-hour yesterday"), not the
 # model's own backtest MAE. A model that does worse than copying yesterday has negative value:
 # anyone could replace it with one line of SQL. Its own backtest MAE is a year-long average, and a
@@ -107,14 +113,16 @@ def check_realised_error(scores: pl.DataFrame, baseline: float | None) -> Check:
             retrain=True,
         )
     n = scores.height
-    if n < MIN_SCORED:
+    days = scores["target_period"].dt.convert_time_zone(MARKET_TIME_ZONE).dt.date().n_unique()
+    if n < MIN_SCORED or days < MIN_DAYS:
         return Check(
             "realised_error",
             title,
             INSUFFICIENT,
             None,
             baseline,
-            f"{n:,} forecasts scored in the last {ERROR_WINDOW.days} days; need {MIN_SCORED:,}",
+            f"{n:,} forecasts over {days} day{'s' if days != 1 else ''} scored in the last "
+            f"{ERROR_WINDOW.days} days; need {MIN_SCORED:,} over at least {MIN_DAYS} days",
             retrain=True,
         )
     mae = float((scores["predicted_mw"] - scores["actual_mw"]).abs().mean())  # type: ignore[arg-type]
@@ -125,8 +133,8 @@ def check_realised_error(scores: pl.DataFrame, baseline: float | None) -> Check:
         status,
         round(mae, 1),
         round(baseline, 1),
-        f"MAE {mae:,.0f} MW over {n:,} forecasts in the last {ERROR_WINDOW.days} days, against "
-        f"{baseline:,.0f} MW for {ERROR_BASELINE} in the backtest",
+        f"MAE {mae:,.0f} MW over {n:,} forecasts on {days} days in the last {ERROR_WINDOW.days} "
+        f"days, against {baseline:,.0f} MW for {ERROR_BASELINE} in the backtest",
         retrain=True,
     )
 

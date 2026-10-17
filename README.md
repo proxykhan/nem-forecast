@@ -123,8 +123,8 @@ from one place: the 34 that targeted the 10:00-16:00 solar window on 15 October 
 over-forecast, by 823 MW on average. A one-sided miss at midday is the signature of more rooftop
 solar than usual, which this model cannot see (it has no weather inputs). It is the backtest's
 known weak spot showing up live, on one day; a group to watch, not yet a finding. The monitor
-republishes this table daily, and the realised-error alert waits for three days of scores (6,912
-forecasts) before it judges anything.
+republishes this table daily, and the realised-error alert waits for at least 1,000 scored
+forecasts over three different days before it judges anything.
 
 **Comparing like with like.** The headline backtest MAE (351 MW) is a year-long average over
 every horizon and every hour. Live forecasts arrive in a very different mix: a forecast issued in
@@ -151,7 +151,10 @@ Two findings from putting monitoring on a real feed:
   loaded rather than a fixed window, and catches up after a late run instead of leaving a gap.
   It also means the "no forecasts for 6 hours" alert can be set off by the scheduler rather
   than the API. That is still a true alert (nobody was being served forecasts), and it is the
-  first thing a real scheduler would fix.
+  first thing a real scheduler would fix. In practice GitHub starts only 7-9 of the 48
+  half-hourly runs a day, which caught out the realised-error alert: it first waited for 6,912
+  scored forecasts in a week (every half-hour for three days), a count it could never reach.
+  It now needs 1,000 over at least three different days.
 
 ## Architecture
 
@@ -466,7 +469,7 @@ verdict, published to GitHub Pages and kept with the run for 90 days.
 
 | Check | Fires when | Why this threshold | On breach |
 |---|---|---|---|
-| Realised error | Rolling 7-day MAE above seasonal naive's backtest MAE (currently 507 MW), with at least 3 days of scores | A model worse than "same time yesterday" has negative value. Its own backtest MAE is a year's average that a hot or cloudy week legitimately exceeds; 7 days covers a full weekly cycle | Issue, retrain |
+| Realised error | Rolling 7-day MAE above seasonal naive's backtest MAE (currently 507 MW), once at least 1,000 forecasts over 3 or more days are scored | A model worse than "same time yesterday" has negative value. Its own backtest MAE is a year's average that a hot or cloudy week legitimately exceeds; 7 days covers a full weekly cycle | Issue, retrain |
 | Feature drift | Any feature's drift score reaches its calibrated threshold | Calibrated to fire in about 1 week in 20 of the last two years; Evidently's default fired in all of them | Issue, retrain |
 | Prediction volume | No forecast logged for 6 hours (checked over 30 hours) | 12 missed half-hourly requests in a row: longer than scheduler delays, cold starts or a redeploy | Issue only: an outage is not a model problem |
 
