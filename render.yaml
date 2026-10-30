@@ -25,4 +25,4 @@ services:
       - key: MODEL_REPO_ID
         value: Azharkhan79/nem-forecast-vic1
       - key: MODEL_REVISION
-        value: fa90c4b4c9a3
+        value: 20261031-0800-7cc9c6b
